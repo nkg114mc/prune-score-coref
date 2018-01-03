@@ -1,0 +1,575 @@
+<project name="coref" default="compile" basedir=".">
+
+	<description>
+		Code to do coreference resolution
+ 	</description>
+
+	<!--  =================================================================== -->
+	<!--  variable declaration							-->
+	<!--  =================================================================== -->
+	<!-- compilation options -->
+	<property name="debug" value="on" />
+	<property name="deprecation" value="off" />
+	<property name="optimize" value="on" />
+	<property name="source" value="1.5" />
+	<property name="target" value="1.5" />
+
+	<property environment="env" />
+	<property name="builddir" value="build" />
+	<!--<property name="alldir" value="all" /> -->
+	<property name="datadir" value="./resources" />
+	<property name="configdir" value="./config" />
+	<property name="srcDir" value="./src" />
+	<!--<property name="wekaDir" value="./weka" /> -->
+	<property name="libDir" value="./lib" />	
+	<property name="tstDir" value="test_src" />	
+	<property name="jarVersions" value="jars" />
+
+	<property name="name" value="reconcile" />
+	<property name="version" value="1.0" />
+
+	<!--  =================================================================== -->
+	<!--  path setup
+	This defines the classpath for compiling the java code.
+	It includes the build directory, the current directory, and every jar in the lib directory (or any subdirectory)								
+	-->
+	<!--  =================================================================== -->
+	<path id="classpath">
+		<pathelement path="${builddir}" />
+		<pathelement path="." />
+		<pathelement path="resources" />
+		<pathelement location="lib/berkeleyParser-1.0.1.jar" />
+		<pathelement location="lib/stanford-ner-2014-01-04.jar" />
+		<pathelement location="lib/stanford-parser-2014-01-04.jar" />
+		<pathelement location="lib/stanford-corenlp-3.3.1.jar"/>
+		<pathelement location="lib/stanford-corenlp-3.3.1-models.jar"/>
+		<pathelement location="lib/commons-logging.jar" />      
+		<pathelement location="lib/commons-collections-3.2.jar" />    
+		<pathelement location="lib/commons-configuration-1.4.jar" />
+		<pathelement location="lib/commons-lang-2.3.jar" />
+		<pathelement location="lib/junit-3.8.jar" />
+		<pathelement location="lib/jwnl-1.4_rc3.1.jar" />  
+		<pathelement location="lib/google-collect-1.0.jar" />
+		<pathelement location="lib/maxent-2.5.2.jar" />
+		<pathelement location="lib/mstparser.jar" />
+		<pathelement location="lib/opennlp-tools-1.4.3.jar" />         
+		<pathelement location="lib/trove.jar" />
+		<pathelement location="lib/truezip-6.7b2.jar" />
+		<pathelement location="lib/utilities.jar" />
+		<pathelement location="lib/Text_Commons-1.4.0.jar" />
+
+		<pathelement location="lib/RankLib.jar" />
+
+		<pathelement location="lib/LBJCoref-1.4-jar-with-dependencies.jar" />
+		<pathelement location="lib/weka.jar" />
+		<pathelement location="lib/futile.jar" />
+
+		<pathelement location="lib/hotjar/args4j-20120919.jar"/>
+     		<pathelement location="lib/hotjar/jaws-bin.jar"/>
+		<pathelement location="lib/hotjar/mallet.jar"/>
+		<pathelement location="lib/hotjar/mallet-deps.jar"/>
+		<pathelement location="lib/hotjar/trove-3.0.3.jar"/>
+
+	</path>
+	
+	<!--  =================================================================== -->
+	<!--  build prep
+	The only thing going on here (right now) is to generate a time stamp
+	and making the build directory 
+	  								-->
+	<!--  =================================================================== -->
+	<target name="prepare">
+		<tstamp />
+		<mkdir dir="${builddir}"/>
+	</target>
+
+	<!--  =================================================================== -->
+	<!--  build targets
+	Builds all of the code in the source directory
+									-->
+	<!--  =================================================================== -->
+	<target name="compile" depends="prepare">
+		<!-- Compile the java code -->
+	<property name="myclasspath" refid="classpath"/>
+    	<!-- <echo message="Classpath = ${myclasspath}"/> -->
+
+		<javac destdir="${builddir}" debug="${debug}" deprecation="${deprecation}" optimize="${optimize}" source="${source}" target="${target}">
+			<classpath refid="classpath" />
+			<src path="${srcDir}" />
+			<!--<src path="${wekaDir}" /> -->
+		</javac>
+	</target>
+	
+	<!--  ================================================================== -->
+	<!--  build targets
+	Builds all of the code in the Testing directory
+									-->
+	<!--  =================================================================== -->
+	<target name="test" depends="compile">
+		<!-- Compile the java code -->
+		<javac destdir="${builddir}" debug="${debug}" deprecation="${deprecation}" optimize="${optimize}" source="${source}" target="${target}">
+			<classpath refid="classpath" />
+			<src path="${tstDir}" />
+		</javac>
+	</target>
+	
+	<!--  =================================================================== -->
+	<!--  build jars								-->
+	<!--  =================================================================== -->
+	<!--
+	<manifestclasspath property="lib.list" jarfile="${jarVersions}/${name}-${version}.jar">
+			<classpath refid="classpath" />
+	</manifestclasspath>
+	-->
+	
+	<target name="jar" depends="clean, compile">
+		<mkdir dir="${jarVersions}"/>
+		<copy todir="${builddir}">
+			<fileset dir="${srcDir}" />
+			<!--<fileset dir="${wekaDir}" />-->
+			<fileset dir="${datadir}" />
+			<fileset dir="${libDir}" />	
+			<!--
+			<zipfileset src="lib/Text_Commons-1.4.0.jar" includes="**/*.java **/*.class"/>
+			<zipfileset src="lib/utilities.jar" includes="**/*.java **/*.class"/>
+			<zipfileset src="lib/truezip-6.7b2.jar" includes="**/*.java **/*.class"/>
+			<zipfileset src="lib/trove.jar" includes="**/*.java **/*.class"/>
+			<zipfileset src="lib/opennlp-tools-1.4.3.jar" includes="**/*.java **/*.class"/>
+			<zipfileset src="lib/mstparser.jar" includes="**/*.java **/*.class"/>
+			<zipfileset src="lib/maxent-2.5.2.jar" includes="**/*.java **/*.class"/>
+			<zipfileset src="lib/google-collect-1.0.jar" includes="**/*.java **/*.class"/>
+			<zipfileset src="lib/jwnl-1.4_rc3.1.jar" includes="**/*.java **/*.class"/>
+			<zipfileset src="lib/junit-3.8.jar" includes="**/*.java **/*.class"/>
+			<zipfileset src="lib/commons-lang-2.3.jar" includes="**/*.java **/*.class"/>
+			<zipfileset src="lib/commons-configuration-1.4.jar" includes="**/*.java **/*.class"/>
+			<zipfileset src="lib/commons-collections-3.2.jar" includes="**/*.java **/*.class"/>
+			<zipfileset src="lib/commons-logging.jar" includes="**/*.java **/*.class"/>
+			<zipfileset src="lib/stanford-ner-2009-01-16.jar" includes="**/*.java **/*.class"/>
+			<zipfileset src="lib/stanford-parser-2010-02-26.jar" includes="**/*.java **/*.class"/>
+			<zipfileset src="lib/berkeleyParser-1.0.1.jar" includes="**/*.java **/*.class"/>
+			-->
+		</copy>
+		<jar destfile="${jarVersions}/${name}-${version}.jar" basedir="${builddir}">
+			<manifest>
+			   <attribute name="Main-Class" value="reconcile.OregonStateCorefMain"/>
+		      <attribute name="Class-Path" value=". ${lib.list}"/>
+		   </manifest>
+		</jar>
+	</target>
+    <target name="allJar" depends="jar">
+        <delete dir="${alldir}" />
+        <mkdir dir="${alldir}"/>
+		<mkdir dir="${alldir}/opennlp"/>
+        <copy todir="${alldir}">
+			<fileset dir="${builddir}" />
+			<fileset dir="${datadir}" />
+		<!--	<file name="${configdir}/resolver.default" /> -->
+		</copy>
+		<mkdir dir="${alldir}/config"/> 
+		<copy todir="${alldir}/config" file="${configdir}/resolver.default" />
+		<mkdir dir="${alldir}/models"/> 
+		<copy todir="${alldir}/models">
+			<fileset dir="./models/" />
+		</copy>
+		
+		<unjar dest="${alldir}">
+			<fileset dir="lib">
+			<include name="**/*.jar" />
+		</fileset>
+			</unjar>
+			<unjar src="lib/stanford-ner-2009-01-16.jar" dest="${alldir}"/>
+			<!--<move todir="${alldir}/temp">
+				<fileset dir="${alldir}/OpenNLP"/>
+			</move>
+			<move todir="${alldir}/opennlp">
+				<fileset dir="${alldir}/temp"/>
+			</move>-->
+			<jar destfile="${jarVersions}/${name}-all-${version}.jar">
+				<fileset dir="${alldir}"/>
+				<!--<fileset dir="${configdir}" file="resolver.default"/>
+				<include name="config/resolver.default" />-->
+				<manifest>
+				<attribute name="Main-Class" value="reconcile.Resolver"/>
+				</manifest>
+			</jar>
+	</target>
+	<target name="allJarOld" depends="jar">
+		<delete dir="${alldir}" />
+		<mkdir dir="${alldir}"/>
+		<copy todir="${alldir}">
+			<fileset dir="${builddir}" />
+		</copy>
+		
+		<unjar src="lib/Text_Commons-1.4.0.jar" dest="${alldir}"/>
+		<unjar src="lib/utilities.jar" dest="${alldir}"/>
+		<unjar src="lib/truezip-6.7b2.jar" dest="${alldir}"/>
+		<unjar src="lib/trove.jar" dest="${alldir}"/>
+		<unjar src="lib/opennlp-tools-1.4.3.jar" dest="${alldir}"/>
+		<unjar src="lib/mstparser.jar" dest="${alldir}"/>
+		<unjar src="lib/maxent-2.5.2.jar" dest="${alldir}"/>
+		<unjar src="lib/google-collect-1.0.jar" dest="${alldir}"/>
+		<unjar src="lib/jwnl-1.4_rc3.1.jar" dest="${alldir}"/>
+		<unjar src="lib/junit-3.8.jar" dest="${alldir}"/>
+		<unjar src="lib/commons-lang-2.3.jar" dest="${alldir}"/>
+		<unjar src="lib/commons-configuration-1.4.jar" dest="${alldir}"/>
+		<unjar src="lib/commons-collections-3.2.jar" dest="${alldir}"/>
+		<unjar src="lib/commons-logging.jar" dest="${alldir}"/>
+		<unjar src="lib/stanford-parser-2010-02-26.jar" dest="${alldir}"/>
+		<unjar src="lib/berkeleyParser-1.0.1.jar" dest="${alldir}"/>
+		<jar destfile="${jarVersions}/${name}-all-${version}.jar" basedir="${alldir}" />
+	</target>
+
+	<!--  ================================================================== -->
+	<!--  housekeeping targets
+	deletes all log files and all of the files left around by emacs
+	deletes the build directory							
+	-->
+	<!--  ================================================================== -->
+
+	<target name="clean">
+		<delete>
+			<fileset dir="./" includes="**/*~" defaultexcludes="no" />
+			<fileset dir="./" includes="**/*.log" />
+		</delete>
+		<delete dir="${builddir}" />
+		<delete dir="${stablebuilddir}" />
+		<delete dir="${alldir}" />
+	</target>
+
+	<target name="run" depends="compile">
+		<property name="myclasspath" refid="classpath"/>
+		<java fork="yes" classname="reconcile.Driver" failonerror="true">
+			<jvmarg value="-Xmx5g"/>
+			<arg line="${config}"/>
+			<classpath refid="classpath"/>
+		</java>
+	</target>
+
+	<target name="oregon" depends="compile">
+		<property name="myclasspath" refid="classpath"/>
+		<java fork="yes" classname="reconcile.OregonStateCorefMain" failonerror="true">
+			<jvmarg value="-Xmx9g"/>
+			<arg line="${config}"/>
+			<classpath refid="classpath"/>
+		</java>
+	</target>
+
+	<target name="oregonprob" depends="compile">
+		<property name="myclasspath" refid="classpath"/>
+		<java fork="yes" classname="reconcile.OregonStateProbabilityTest" failonerror="true">
+			<jvmarg value="-Xmx10g"/>
+			<arg line="${config}"/>
+			<classpath refid="classpath"/>
+		</java>
+	</target>
+
+	<target name="ontocvt" depends="compile">
+		<property name="myclasspath" refid="classpath"/>
+		<java fork="yes" classname="reconcile.conll.OntoNotesConvertor" failonerror="true">
+			<jvmarg value="-Xmx3g"/>
+			<arg line="${config}"/>
+			<classpath refid="classpath"/>
+		</java>
+	</target>
+
+	<target name="autopro" depends="compile">
+		<property name="myclasspath" refid="classpath"/>
+		<java fork="yes" classname="reconcile.conll.ConllTestAutoFileProcess" failonerror="true">
+			<jvmarg value="-Xmx3g"/>
+			<arg line="${config}"/>
+			<classpath refid="classpath"/>
+		</java>
+	</target>
+
+	<target name="conllscorertest" depends="compile">
+		<property name="myclasspath" refid="classpath"/>
+		<java fork="yes" classname="reconcile.conll.ConllScriptScorer" failonerror="true">
+			<jvmarg value="-Xmx3g"/>
+			<arg line="${config}"/>
+			<classpath refid="classpath"/>
+		</java>
+	</target>
+
+	<target name="resolve" depends="compile">
+		<property name="myclasspath" refid="classpath"/>
+		<java fork="yes" classname="reconcile.Resolver" failonerror="true">
+			<jvmarg value="-Xmx2g"/>
+			<arg line="${files}"/>
+			<classpath refid="classpath"/>
+		</java>
+	</target>
+
+
+<!-- ========================================= -->
+<!-- regression test targets -->
+<!-- ========================================= -->
+    <target name="regressionTest">
+	<antcall target="regressionUW">
+		</antcall>
+	  </target>
+	
+	<target name="regressionMUC" depends="clean, compile">
+			<antcall target="regression">
+				<param name="dataset_name" value="MUC 6"/>
+				<param name="dataset_config" value="./regression/config/muc6.default"/>
+ 			</antcall>
+
+			<antcall target="regression">
+				<param name="dataset_name" value="MUC 7"/>
+				<param name="dataset_config" value="./regression/config/muc7.default"/>
+ 			</antcall>
+
+			<echo message="Running diff on MUC6 scores:"/>
+		     <antcall target="diffScores" >
+					<param name="std_score" value="regression/scores/muc6-default.rec"/>
+					<param name="user_score" value="regression/scores/muc6-user.rec"/>
+			  </antcall>
+
+			<echo message="Running diff on MUC7 scores:"/>
+		     <antcall target="diffScores" >
+					<param name="std_score" value="regression/scores/muc6-default.rec"/>
+					<param name="user_score" value="regression/scores/muc6-user.rec"/>
+			  </antcall>
+	  </target>
+
+	<target name="regressionUW">
+	<antcall target="regression">
+		<param name="dataset_name" value="uw"/>
+		<param name="dataset_config" value="./regression/config/uw.default"/>
+		</antcall>
+		<echo message="Running diff on UW scores:"/>
+		<antcall target="diffScores" >
+			<param name="std_score" value="regression/scores/uw-default.rec"/>
+			<param name="user_score" value="regression/scores/uw-user.rec"/>
+		</antcall>
+	</target>
+
+	  <target name="regressionMUC6">
+	<antcall target="regression">
+		<param name="dataset_name" value="MUC 6"/>
+		<param name="dataset_config" value="./regression/config/muc6.default"/>
+		</antcall>
+	  </target>
+	
+	
+	  <target name="regressionMUC7">
+	<antcall target="regression">
+		<param name="dataset_name" value="MUC 7"/>
+		<param name="dataset_config" value="./regression/config/muc7.default"/>
+		</antcall>
+	  </target>
+	
+	  <target name="regression" depends ="compile">
+		<echo message="Running ${dataset_name} test"/>
+		<java fork="yes" classname="reconcile.Driver" failonerror="true">
+			<classpath refid="classpath"/>
+			<jvmarg value="-Xmx1g"/>
+			<arg line="${dataset_config}"/>
+		</java>
+   </target>
+
+
+  <target name="diffMUCScores">
+     <antcall target="diffScores" >
+			<param name="std_score" value="regression/scores/muc6-default.rec"/>
+			<param name="user_score" value="regression/scores/muc6-user.rec"/>
+	  </antcall>
+  </target>
+
+	  <target name="diffScores" depends="compile">
+			<echo message="Running diff on scores:"/>
+			<echo message="${user_score}"/>
+			<echo message="vs"/>
+			<echo message="${std_score}"/>
+			<java fork="yes" classname="reconcile.util.Comparator" failonerror="true">
+				<jvmarg value="-Xmx1g"/>
+				<arg line="${user_score}"/>
+				<arg line="${std_score}"/>
+				<classpath refid="classpath"/>
+			</java>
+	  </target>
+	  
+	 <!-- runs the Annotation Viewer -->
+	 <target name="aviewer" depends="compile">
+		 <java fork="yes" classname="reconcile.visualTools.AnnotationViewer" failonerror="true">
+			<jvmarg value="-Xmx400m"/>
+			<arg line="${arg1}"/>
+			<classpath refid="classpath"/>
+		 </java>
+    </target>
+
+	<!-- =============================================================== -->
+	<!-- view and edit annotations -->
+	<!-- =============================================================== -->
+	<target name="editAnnotations" depends="compile">
+		<java fork="yes" classname="reconcile.visualTools.annotator.CorpusAnnotationEditor" failonerror="true" >
+	         <jvmarg value="-Xmx1g"/>
+	         <classpath refid="classpath"/>
+			<arg value="${corpus}"/>
+		</java>
+	</target>
+
+	
+	<!-- =============================================================== -->
+	<!-- run pieces of the pipeline -->
+	<!-- =============================================================== -->
+	<target name="Trainer" depends="compile">
+		<echo message="Running Trainer:"/>
+		<echo message="${corpus}"/>
+		<echo message="on gold set"/>
+		<echo message="${gold}"/>
+		<echo message="output to: models"/>
+		<java fork="yes" classname="reconcile.drivers.Trainer" failonerror="true">
+			<jvmarg value="-Xmx1g"/>
+			<arg line="${corpus}"/>
+			<arg line="${gold}"/>
+			<arg line="models"/>
+			<classpath refid="classpath"/>
+		</java>
+  </target>
+
+	
+	<target name="PreprocessFileList" depends="compile">
+		<echo message="Running Preprossor on file list:"/>
+		<echo message="${corpus}"/>
+		<java fork="yes" classname="reconcile.drivers.PreprocessFileList" failonerror="true">
+			<jvmarg value="-Xmx1g"/>
+			<arg line="${corpus}"/>
+			<classpath refid="classpath"/>
+		</java>
+  </target>
+
+	<target name="SinglePreprocess" depends="compile">
+		<echo message="Running prerprosseor on:"/>
+		<echo message="${corpus}"/>
+		<echo message="Using only the annotator:"/>
+		<echo message="${annotator}"/>
+		<java fork="yes" classname="reconcile.drivers.SingleAnnotatorPreprocess" failonerror="true">
+			<jvmarg value="-Xmx1g"/>
+			<arg line="${corpus}"/>
+			<arg line="${annotator}"/>
+			<classpath refid="classpath"/>
+		</java>
+  </target>
+
+	
+	<target name="FeatureGenerator" depends="compile">
+		<echo message="Running FeatureGenerator:"/>
+		<echo message="${corpus}"/>
+		<java fork="yes" classname="reconcile.drivers.FeatureGenerator" failonerror="true">
+			<jvmarg value="-Xmx1g"/>
+			<arg line="${corpus}"/>
+			<classpath refid="classpath"/>
+		</java>
+  </target>
+
+	<target name="Annotator" depends="compile">
+		<echo message="Running Annotator:"/>
+		<echo message="${corpus}"/>
+		<echo message="producing coref annotations:"/>
+		<echo message="${coref}"/>
+		<echo message="using model"/>
+		<echo message="${model}"/>
+		<java fork="yes" classname="reconcile.drivers.Annotator" failonerror="true">
+			<jvmarg value="-Xmx1g"/>
+			<arg line="${corpus}"/>
+			<arg line="${model}"/>
+			<arg line="${coref}"/>
+			<classpath refid="classpath"/>
+		</java>
+  </target>
+
+	<target name="Cleaner" depends="compile">
+		<echo message="Running Cleaner:"/>
+		<echo message="${corpus}"/>
+		<echo message="producing coref annotations:"/>
+		<echo message="${coref}"/>
+		<java fork="yes" classname="reconcile.drivers.Cleaner" failonerror="true">
+			<jvmarg value="-Xmx1g"/>
+			<arg line="${corpus}"/>
+			<arg line="${coref}"/>
+			<classpath refid="classpath"/>
+		</java>
+  </target>
+
+	<target name="Score" depends="compile">
+		<echo message="Running Score:"/>
+		<echo message="${corpus}"/>
+		<echo message="gold annotations:"/>
+		<echo message="${gold}"/>
+		<echo message="test annotations:"/>
+		<echo message="${coref}"/>
+		<java fork="yes" classname="reconcile.drivers.Score" failonerror="true">
+			<jvmarg value="-Xmx1g"/>
+			<arg line="${corpus}"/>
+			<arg line="${gold}"/>
+			<arg line="${coref}"/>
+			<classpath refid="classpath"/>
+		</java>
+  </target>
+	
+	<!-- =================================================================== -->
+	<!-- Sundance Targets -->
+	<!-- =================================================================== -->
+	<target name="Autoslog" depends="compile">
+		<echo message="Running Autoslog on corpus:"/>
+		<echo message="${corpus}"/>
+		<java fork="yes" classname="reconcile.drivers.AutoslogDriver" failonerror="true">
+			<jvmarg value="-Xmx1g"/>
+			<arg line="${corpus}"/>
+			<classpath refid="classpath"/>
+		</java>
+	</target>
+	 
+	<!-- =================================================================== -->
+	<!-- JUNIT Test Target -->
+	<!-- =================================================================== -->
+	<target name="junitTest" depends="compile">
+		<mkdir dir="test-results" />
+		<junit errorproperty="failed" failureproperty="failed" printsummary="on" fork="yes">
+			<classpath refid="classpath" />
+			<jvmarg value="-Xmx512m" />
+			<formatter type="brief" usefile="false" />
+			<formatter type="xml" />
+			<batchtest todir="test-results">
+				<fileset dir="${builddir}" includes="**/*Test.class" />
+				<fileset dir="${builddir}" includes="**/*Tests.class" />
+			</batchtest>
+		</junit>
+		<fail if="failed" message="Test cases failed" />
+	</target>
+	
+
+
+	<!-- =================================================================== -->
+	<!-- HOTCoref Interface -->
+	<!-- =================================================================== -->
+	<target name="hotcoref" depends="compile">
+		<property name="myclasspath" refid="classpath"/>
+		<java fork="yes" classname="ims.hotcoref.oregonstate.OregonStateHotMain" failonerror="true">
+			<jvmarg value="-Xmx10g"/>
+			<arg line="${config}"/>
+			<classpath refid="classpath"/>
+		</java>
+	</target>
+
+	<target name="hottrain" depends="compile">
+		<property name="myclasspath" refid="classpath"/>
+		<java fork="yes" classname="ims.hotcoref.oregonstate.OregonStateHotTrain" failonerror="true">
+			<jvmarg value="-Xmx10g"/>
+			<arg line="${config}"/>
+			<classpath refid="classpath"/>
+		</java>
+	</target>
+
+	<!-- policy error identifier training iterface -->
+	<target name="hoterridenttrain" depends="compile">
+		<property name="myclasspath" refid="classpath"/>
+		<java fork="yes" classname="ims.hotcoref.oregonstate.PolicyErrorIdentifier" failonerror="true">
+			<jvmarg value="-Xmx10g"/>
+			<arg line="${config}"/>
+			<classpath refid="classpath"/>
+		</java>
+	</target>
+
+</project>

@@ -1,0 +1,880 @@
+package reconcile.structuredClassifiers;
+
+import java.io.DataOutputStream;
+import java.io.File;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.OutputStreamWriter;
+import java.io.PrintWriter;
+import java.util.ArrayList;
+import java.util.HashMap;
+import ciir.umass.edu.eval.Evaluator;
+
+import reconcile.Constructor;
+import reconcile.SystemConfig;
+import reconcile.data.AnnotationSet;
+import reconcile.data.Document;
+import reconcile.general.Utils;
+import reconcile.scorers.Scorer;
+import reconcile.mentions.MentionFilter;
+import reconcile.util.DocArray2DocIterable;
+
+
+/**
+ * @author Chao Ma
+ * 
+ */
+
+public class PolicyPrunner extends StructuredClassifier {
+
+	// policy
+	GreedyPrun policyPruner = null;
+	// ranklib
+	Evaluator ranklibLearner;
+	// svmrank
+	SvmrankLearner svmrnkLearner =  new SvmrankLearner();
+	
+	// feature merger
+	FeatureFileMerger featureMerger = new FeatureFileMerger();
+	
+	
+	// mention filter
+	MentionFilter prunerMentionFilter = null;
+	
+	
+	private int N_Policy_Pruner_Iteration = 0; // the k in stacking algorithm
+	private int prunerBeamSize = 0;
+	
+	// validation docs
+	private static String corpusName = "unknown";
+	//ArrayList<Document> validDocs = null;
+	
+	//private static Scorer scorer; 
+	private static Scorer mucScorer;     // specific scorer
+	private static Scorer bcubeScorer;   // specific scorer
+	private static Scorer ceafScorer;
+	
+	private static boolean useGoldMention;
+	private static String firstRndModel = "";
+	
+	private static String featFolderPath = "";
+	private static String modelFolderPath = "";
+	private static String learnerName = "";
+	
+	private static String testPrunerModel = "";
+	
+	private static String mergerPath = "";
+	
+	private static String svmrank_learn = "";
+	private static String svmrank_perl = "";
+	private static String svmrank_m2w = "";
+	
+	// ranklib arg
+	private static String ranklibArg = null;
+	
+	// 
+	private static String prunerFeatName = "prunerFeatTraining";
+	private static String prunerModelName = "prun_model";
+	
+	// log file path
+	private static String logfilePath = "logfile.log";
+	private static PrintWriter logPrinter = null;
+	
+	////////////////////////////////////////////////////////////
+	// Output //////////////////////////////////////////////////
+	////////////////////////////////////////////////////////////
+	// result
+	//private String bestModelPath;
+	private HashMap<Integer, Double> modelPerformce = new HashMap<Integer, Double>();
+	private HashMap<Integer, String> modelPath = new HashMap<Integer, String>();
+	
+	// ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	
+	public PolicyPrunner() {
+		// Loading the policy
+		String policyName = "GreedyPrun";
+		String modelFN = "";
+		policyPruner = Constructor.createPolicyPruner(policyName, modelFN);
+
+		parsingConfig();
+	}
+	
+	public void parsingConfig() {
+
+		// load scorer
+		mucScorer = Constructor.createScorer("MUCScore");
+		bcubeScorer = Constructor.createScorer("BCubedScore");
+		ceafScorer = Constructor.createScorer("CEAFScore");
+		
+		// load configs
+		SystemConfig cfg = Utils.getConfig();
+		
+		// use gold mentions?
+		useGoldMention = cfg.getBoolean("USE_GOLD_MENTIONS", false);
+		
+		
+		N_Policy_Pruner_Iteration =  cfg.getInteger("NUM_PRUN_ITERATION", 10);
+		prunerBeamSize  = cfg.getInteger("PRUNNER_BEAM_SIZE", 4);
+		
+		
+		firstRndModel = cfg.getString("PRUN_FRIST_MODEL_PATH", "");
+		
+		featFolderPath = cfg.getString("PRUN_FEAT_FOLDER_PATH", "");
+		modelFolderPath = cfg.getString("PRUN_MODEL_FOLDER_PATH", "");
+		learnerName = cfg.getString("PRUN_LEARNER", "svmrank"); // default learner name
+		
+		// testing models
+		testPrunerModel = cfg.getString("PRUNNER_RANKLIB_MODEL_PATH", "noprun_avg_rlmodel_ace04.txt");
+		
+		// merger path
+		mergerPath = cfg.getString("FEATURE_MERGER_PATH", "mergefeat");
+		featureMerger.setMergerPath(mergerPath);
+		
+		// output feature
+		//totalOffFeatPath = cfg.getString("FEATURE_LOG_PATH", "offFeatLog.txt");
+
+		// ranklib argument
+		ranklibArg = cfg.getString("PRUN_RANKLIB_ARG", "");;
+		
+		// svmrank path
+		svmrank_learn = cfg.getString("SVMRANK_LEARN_PATH", "svm_rank_learn");
+		svmrank_perl = cfg.getString("SVMRANK_PERL_PATH", "svm2weight.pl");
+		svmrank_m2w = cfg.getString("SVMRANK_MODEL_WEIGHT_PATH", "weight.txt");
+		svmrnkLearner.setSvmrankPath(svmrank_learn);
+		svmrnkLearner.setSvmPerlPath(svmrank_perl);
+		svmrnkLearner.setM2WPath(svmrank_m2w);
+		
+		corpusName = cfg.getDataset();
+		
+		// is there any validation docs?
+		//validDocs = loadValidationDocs(cfg);
+		
+		// init logfile
+		logfilePath = cfg.getString("PRUNING_LOG_PATH", "logfile.txt");
+		logPrinter = loadLogPrinter(logfilePath);
+	}
+	
+	/// interface for setting some properties
+	public void setValidationDocs(ArrayList<Document> vdocs) {
+		//validDocs = vdocs;
+	}
+	public void setPrunerIteration(int iter) {
+		N_Policy_Pruner_Iteration = iter;
+	}
+	public void setBeamSize(int beam) {
+		prunerBeamSize = beam;
+	}
+	
+	public void setLearnerName(String name) {
+		learnerName = name;
+	}
+	public void setCorpusName(String name) {
+		corpusName = name;
+	}
+
+	public void setFirstModelPath(String path) {
+		firstRndModel = path;
+	}
+	public void setFeatureFolderPath(String path) {
+		featFolderPath = path;
+	}	
+	public void setFeatureBaseName(String bname) {
+		prunerFeatName = bname;
+	}
+	public void setModelBaseName(String bname) {
+		prunerModelName = bname;
+	}
+
+	
+	public void setModelFolderPath(String path) {
+		modelFolderPath = path;
+	}
+	public void setMergerPath(String path) {
+		mergerPath = path;
+		featureMerger.setMergerPath(mergerPath);
+	}
+	public void setSvmrankProperty(String learnpath, String perlpath, String m2wpath) {
+		svmrank_learn = learnpath;
+		svmrank_perl = perlpath;
+		svmrank_m2w = m2wpath;
+		svmrnkLearner.setSvmrankPath(svmrank_learn);
+		svmrnkLearner.setSvmPerlPath(svmrank_perl);
+		svmrnkLearner.setM2WPath(svmrank_m2w);
+	}
+	public void setLambdamartArg(String lmdarg){
+		ranklibArg = lmdarg;
+	}
+	
+	public void setLogPath(String path) {
+		logfilePath = path;
+		logPrinter = loadLogPrinter(logfilePath);
+	}
+
+	public void setMentionFilter(MentionFilter mft) {
+		// set mention filter for the pruner trainer
+		prunerMentionFilter = mft;
+		System.out.println("Pruner training: mention filter was set!");
+	}
+	
+	public void setUseFilterOrNot(boolean useOrNot) {
+	}
+	
+/*
+	private ArrayList<Document> loadValidationDocs(SystemConfig cfg)
+	{
+	    List<File> validFileNames = getValidFiles(cfg);
+	    Iterable<Document> validNames = new File2DocIterable(validFileNames);
+	    FeatureVectorGenerator.makeFeatures(validNames, true);
+	    
+	    ArrayList<Document> validdocs = new ArrayList<Document>();
+	    for (Document doc : validNames) {
+	    	validdocs.add(doc);
+	    	System.out.println("Loading valid doc: " + doc.getAbsolutePath());
+	    }
+
+	    return validdocs;
+	}
+*/
+	
+	private PrintWriter loadLogPrinter(String path) {
+		PrintWriter lprinter = null;
+		try {
+			FileOutputStream logos = new FileOutputStream(path);
+			lprinter = new PrintWriter(new OutputStreamWriter(logos),true);
+		} catch(FileNotFoundException ex) {
+			throw new RuntimeException("Can not find the prunner log: "+path+"!");
+		}
+		return lprinter;
+	}
+
+	
+	public void testAll(Iterable<Document> docs, String modelInputFile, String[] options){
+		/*
+		boolean inMemory = false;
+		// 1) pre-process
+		testPrepare();
+		// 2)resolve each 
+		for (Document doc : docs) {
+			AnnotationSet result = test(doc, modelInputFile, options);
+			if(!inMemory){
+				try {
+					File out = doc.getClusterFile();
+					PrintWriter outWriter = new PrintWriter(out);
+					new AnnotationWriterBytespan().write(result, outWriter);
+				}
+				catch (IOException ioe) {
+					throw new RuntimeException(ioe);
+				}
+			}
+		}
+		// 3) post-process
+		testPostprocess();
+		*/
+		testPruner(docs, modelInputFile, options);
+	}
+
+	public AnnotationSet test(Document doc, String modelInputFile, String[] options){
+		return null;
+	}
+
+	public void testPruner(Iterable<Document> idocs, String modelInputFile, String[] options)
+	{
+		int i, j;
+
+		// training docs
+		ArrayList<Document> testDocs = new ArrayList<Document>();
+		for (Document doc : idocs){
+			testDocs.add(doc);
+		}
+
+		// have a test on validation set?
+		// which one is the best?
+		String[] allprunperf = new String[16];
+
+		//// specific for lamdamart
+		String lamdaMartCmd = "-tree 1000 -leaf 50 -shrinkage 0.1 -tc -1 -mls 1 -estop 50 -tvs 0.8 -ranker 6 ";
+		if (!ranklibArg.equals("")) {
+			lamdaMartCmd = ranklibArg;
+		}
+		
+		/*
+		String[] rankerPath = {
+			"", 
+			"", 
+		};*/
+		int[] possibleBeam = {2, 3, 4, 5, 6, 8, 10, 20 };
+		for (j = 0; j < possibleBeam.length; j++) {
+			prunerBeamSize = possibleBeam[j];
+			
+		// record on the log
+		logPrinter.println("corpusName: " + corpusName);
+		logPrinter.println("TestDocs: " + testDocs.size());
+		//logPrinter.println("ValidatingDocs: " + validDocs.size());
+		logPrinter.println("pruner ranker: " + learnerName);
+		logPrinter.println("pruner beam size: " + prunerBeamSize);
+		logPrinter.println("RankLib arg: " + lamdaMartCmd);
+
+		// clear the iteration records ...
+		modelPerformce.clear();
+		modelPath.clear();
+
+		// testing pruner accuracy
+		System.out.println("Begin to scoring ...");
+		policyPruner.clearStatistics();
+		
+		// test on validation to get the score
+		if (learnerName.equals("lambdamart")) {
+			String prunModelName = testPrunerModel;
+			String[] tstOpts = { "TurnOffCandidateDiscrepancyCollection", "-useRanklib", "0", "-useSvmrank", "1",
+					"-prunBeamSize", String.valueOf(prunerBeamSize),
+					"-prunRankerName", "lambdamart",  "-prunModelPath", prunModelName };
+			policyPruner.testAll(testDocs, "",  tstOpts);
+		} else if (learnerName.equals("svmrank")) {
+			String prunModelName = testPrunerModel;
+			String[] tstOpts = { "TurnOffCandidateDiscrepancyCollection", "-useRanklib", "0", "-useSvmrank", "1", 
+					"-prunBeamSize", String.valueOf(prunerBeamSize),
+					"-prunRankerName", "svmrank", "-prunModelPath", prunModelName };
+			policyPruner.testAll(testDocs, "",  tstOpts);
+		} else {
+			throw new RuntimeException("What's the learner's name???");
+		}
+
+		String prunPerfm = policyPruner.getPruningPerformance();
+		allprunperf[0] = prunPerfm;
+		System.out.println("Pruner accuracy " + allprunperf[0]);
+
+		// for logfile
+		logPrinter.println("===============================================");
+		logPrinter.println("TestingDocs: " + testDocs.size());
+		logPrinter.println("beam " + prunerBeamSize + " pruner accuracy " + allprunperf[0]);
+		logPrinter.println("modelName: " + testPrunerModel);
+		logPrinter.println("===============================================");
+		// record the performce and model path
+
+		String[] words = allprunperf[0].split(" ");
+		modelPerformce.put(0, Double.parseDouble(words[1]));
+		modelPath.put(0, testPrunerModel);
+		
+		}
+		
+		
+		// scoring ...
+		//System.out.println("Scoring for iteration " + i + "...");
+		//double[] bcubeScore = bcubeScorer.score(false, new DocArray2DocIterable(finalTestDocs));
+		//double bcubeF1 = bcubeScore[2];
+		//double[] mucScore = mucScorer.score(false, new DocArray2DocIterable(finalTestDocs));
+		//double mucF1 = mucScore[2];
+		//double[] ceafScore = ceafScorer.score(false, new DocArray2DocIterable(finalTestDocs));
+		//double ceafF1 = ceafScore[2];
+		/////////////////////////
+		//allscores[i][0] = bcubeScore;
+		//allscores[i][1] = mucScore;
+		//allscores[i][2] = ceafScore;
+		//allBCubeF1.add(bcubeF1);
+		//allMucF1.add(mucF1);
+		//allCeafF1.add(ceafF1);
+		//System.out.println("Iteration " + i + " scores:");
+		//System.out.println("BCube " + bcubeScore[0] + "|" + bcubeScore[1] + " = " + bcubeScore[2]);
+		//System.out.println("MUC   " + mucScore[0] + "|" + mucScore[1] + " = " + mucScore[2]);
+		//System.out.println("CEAF  " + ceafScore[0] + "|" + ceafScore[1] + " = " + ceafScore[2]);
+
+
+		// use Precision@k metric, no iterations anymore
+		
+		// Have a look the score
+		System.out.println("/////////////////////////////////////////////////");
+		System.out.println("////  Scores on all the iterations //////////////");
+		System.out.println("/////////////////////////////////////////////////");
+		for (i = 0; i < N_Policy_Pruner_Iteration; i++) {
+			System.out.println("Iteration " + i + " scores:");
+			System.out.println("Pruner accuracy " + allprunperf[i]);
+		}
+	}
+
+	
+	public void train(Iterable<Document> idocsTrain, Iterable<Document> idocsValid, String outputModelName, String[] options) {
+		playPolicyPrunnerTrain(idocsTrain, idocsValid);
+		// output
+		outputModelName = getBestPrunerModelPath();
+	}
+	
+	private String getLambdaMartCmd(int i, int beam) {
+		String lamdaMartCmd = "-tree 1000 -leaf 100 -shrinkage 0.1 -tc -1 -mls 1 -estop 50 -tvs 0.8 -ranker 6 ";
+		String[] lmcmd = new String[4];
+		
+		lmcmd[0] = "-tree 1000 -leaf 15 -shrinkage 0.1 -tc -1 -mls 1 -estop 50 -tvs 0.8 -ranker 6 ";
+		lmcmd[1] = "-tree 1000 -leaf 25 -shrinkage 0.1 -tc -1 -mls 1 -estop 50 -tvs 0.8 -ranker 6 ";
+		lmcmd[2] = "-tree 1000 -leaf 50 -shrinkage 0.1 -tc -1 -mls 1 -estop 50 -tvs 0.8 -ranker 6 ";
+		/*
+		if (i < 3 && beam < 10) {
+			return lmcmd[i];
+		}
+		*/
+		return lamdaMartCmd;
+	}
+	
+	private void playPolicyPrunnerTrain(Iterable<Document> idocs, Iterable<Document> vdocs)
+	{
+		assert(idocs != null);
+		ArrayList<String> prunFeatFileNames = new ArrayList<String>();
+		ArrayList<String> prunMergeFeatFiles = new ArrayList<String>();
+		ArrayList<String> modelFileNames = new ArrayList<String>();
+		int i;
+
+		// training docs
+		ArrayList<Document> trainDocs = new ArrayList<Document>();
+		ArrayList<Document> validDocs = new ArrayList<Document>();
+		if (vdocs != null) {
+			for (Document doc : idocs){
+				trainDocs.add(doc);
+			}
+			for (Document doc : vdocs){
+				validDocs.add(doc);
+				//trainDocs.add(doc);
+			}
+		} else {
+			for (Document doc : idocs){
+				trainDocs.add(doc);
+			}
+		}
+		
+		// have a test on validation set?
+		// which one is the best?
+		//ArrayList<Double> allBCubeF1 = new ArrayList<Double>();
+		//ArrayList<Double> allMucF1 = new ArrayList<Double>();
+		//ArrayList<Double> allCeafF1 = new ArrayList<Double>();
+		//double[][][] allscores = new double[16][3][3];
+		String[] allprunperf = new String[16];
+		ArrayList<Document> finalTestDocs = validDocs;
+		
+		//// specific for lamdamart
+		//String lamdaMartCmd = "-tree 1000 -leaf 50 -shrinkage 0.1 -tc -1 -mls 1 -estop 50 -tvs 0.8 -ranker 6 ";
+		String lamdaMartCmd = "-sparse -tree 1000 -leaf 275 -shrinkage 0.1 -tc -1 -mls 1 -estop 75 -ranker 6 ";
+		//if (!ranklibArg.equals("")) {
+		//	lamdaMartCmd = ranklibArg;
+		//}
+		
+		// record on the log
+		logPrinter.println("corpusName: " + corpusName);
+		logPrinter.println("TrainingDocs: " + trainDocs.size());
+		logPrinter.println("ValidatingDocs: " + validDocs.size());
+		logPrinter.println("pruner ranker: " + learnerName);
+		logPrinter.println("N_iteration: " + N_Policy_Pruner_Iteration);
+		logPrinter.println("pruner beam size: " + prunerBeamSize);
+		logPrinter.println("RankLib arg: " + lamdaMartCmd);
+		
+		// clear the iteration records ...
+		modelPerformce.clear();
+		modelPath.clear();
+		
+		// training in
+		//for (i = 0; i < N_Policy_Pruner_Iteration; i++) {
+		for (i = 0; i < 1; i++) {
+			
+			System.out.println("/////////////////////////////////////////////////");
+			System.out.println("//// Prun Iterations " + i + " ////////////////");
+			System.out.println("/////////////////////////////////////////////////");
+
+			// generate feature files for training set
+			String trainFeatName = featFolderPath + "/" + prunerFeatName + "_" + "beam" + prunerBeamSize + "_" + corpusName + "_iter" + String.valueOf(i) + ".txt";
+			String validFeatName = featFolderPath + "/" + "prunerFeatValidate" + "_" + "beam" + prunerBeamSize + "_" + corpusName + "_iter" + String.valueOf(i) + ".txt";
+			prunFeatFileNames.add(trainFeatName); // recode off-trajectory feature file
+			
+			System.out.println("Pruner learner: " + learnerName);
+			
+			if (learnerName.equals("lambdamart")) {
+				String modelfn =  null;
+				if (i > 0)  {
+					modelfn = modelFileNames.get(i - 1); // use the last model to generate the features
+				} else {
+					modelfn = firstRndModel;
+				}
+				String[] optionsTrain = { "TurnOffCandidateDiscrepancyCollection", "-prunFeatFN", trainFeatName, "-useRanklib", "1", "-modelFileName", modelfn, 
+						                 "-prunBeamSize", String.valueOf(prunerBeamSize), "-prunIter", String.valueOf(i), "-prunLearning", "1"};
+				System.out.println("Begin Pruner Train Features =======================");
+				//if (!useGoldMention) {
+				//	if (useMentionFilter) {
+				//		//MentionFilter.removeUnmatchedPredictMentions(trainDocs);
+				//		prunerMentionFilter.filterMentionsConll2012_BestPair(trainDocs);
+				//	}
+				//}
+				policyPruner.train(trainDocs, "",  optionsTrain); // generate feature file for training
+				System.out.println("End Pruner Test Features ==========================");
+				
+				// is there any validating docs?
+				if (validDocs != null && validDocs.size() > 0) {
+					String[] optionsValid = { "TurnOffCandidateDiscrepancyCollection", "-prunFeatFN", validFeatName, "-useRanklib", "1", "-modelFileName", modelfn, 
+			                 "-prunBeamSize", String.valueOf(prunerBeamSize), "-prunIter", String.valueOf(i), "-prunLearning", "1"};
+					System.out.println("Begin Pruner Valid Features =======================");
+					//if (!useGoldMention) {
+					//	if (useMentionFilter) {
+					//		//MentionFilter.removeUnmatchedPredictMentions(validDocs);
+					//		prunerMentionFilter.filterMentionsConll2012_BestPair(validDocs);
+					//	}
+					//}
+					policyPruner.train(validDocs, "",  optionsValid); // generate feature file for validating
+					System.out.println("End Pruner Valid Features =========================");
+				}
+				
+
+			} else if (learnerName.equals("svmrank")) {
+				String modelfn =  null;
+				if (i > 0)  {
+					modelfn = modelFileNames.get(i - 1); // use the last model to generate the features
+				} else {
+					modelfn = firstRndModel;
+				}
+				String[] optionsTrain = { "TurnOffCandidateDiscrepancyCollection", "-useRanklib", "0", "-useSvmrank", "1", "-prunFeatFN", trainFeatName, 
+						                 "-modelFileName", modelfn, "-prunBeamSize", String.valueOf(prunerBeamSize), "-prunIter", String.valueOf(i), "-prunLearning", "1" };
+				System.out.println("=======================");
+				policyPruner.train(trainDocs, "",  optionsTrain); // generate feature file for training
+				System.out.println("=======================");
+			} else {
+				throw new RuntimeException("What's the learner's name???");
+			}
+
+			/*
+			if (false) {
+				// merge the new generated features file into the old ones
+				System.out.println("Merging feature files for iteration " + i + ".....");
+				String mergeFeatName = featFolderPath + "/pruner_merge_" + "beam" + prunerBeamSize + "_" + corpusName + "_iter" + String.valueOf(i) + ".txt";
+				featureMerger.mergeFeatureFiles(prunFeatFileNames, mergeFeatName);
+				prunMergeFeatFiles.add(mergeFeatName);
+			}
+			*/
+			
+			// training with svmrank or Ranklib
+			String modelFN = null;
+			if (learnerName.equals("lambdamart")) {
+				//modelFN = modelFolderPath + "/prun_lambdamart_model_" + "beam" + prunerBeamSize + "_" + corpusName + "_iter" + String.valueOf(i) + ".txt";
+				modelFN = modelFolderPath + "/" + prunerModelName + "_lambdamart_" + "beam" + prunerBeamSize + "_" + corpusName + "_iter" + String.valueOf(i) + ".txt";
+				modelFileNames.add(modelFN); // record file name
+				String mainCmd = lamdaMartCmd;//"-tree 1000 -leaf 50 -shrinkage 0.1 -tc -1 -mls 1 -estop 50 -tvs 0.8 -ranker 6 ";
+				//String mainCmd = getLambdaMartCmd(i, prunerBeamSize);
+				String rankingMetricCmd = "-metric2t " + "P@" + prunerBeamSize + " ";
+				//String rankingMetricCmd = "-metric2t ERR@200 ";
+				//String rankingMetricCmd = "";//"-metric2t NDCG@200 ";
+				//String trainCmd = "-train " + mergeFeatName + " ";
+				String trainCmd = "-train " + trainFeatName + " ";
+				// about validation
+				String validCmd = "-tvs 0.8 ";
+				if (validDocs.size() > 0) {
+					validCmd = "-validate " + validFeatName + " ";
+				}
+				String modelCmd = "-save " + modelFN;
+				String lamdamart_arg = mainCmd + rankingMetricCmd + trainCmd + validCmd + modelCmd;
+				lamdaMARTTrain(lamdamart_arg);
+			} else if (learnerName.equals("svmrank")) {
+				//modelFN = modelFolderPath + "/prun_svmrank_weight_" + "beam" + prunerBeamSize + "_" + corpusName + "_iter" + String.valueOf(i) + ".txt";//"/prunSvmrankWeight-" + String.valueOf(i) + ".txt";
+				modelFN = modelFolderPath + "/" + prunerModelName + "_svmrank_" + "beam" + prunerBeamSize + "_" + corpusName + "_iter" + String.valueOf(i) + ".txt";//"/prunSvmrankWeight-" + String.valueOf(i) + ".txt";
+				modelFileNames.add(modelFN); // record file name
+				svmrankTrain(validDocs, trainFeatName, modelFN); // TODO validDocs
+				//svmrankTrain(validDocs, mergeFeatName, modelFN);
+			} else {
+				throw new RuntimeException("What's the learner's name???");
+			}
+			
+			
+			System.out.println("Begin to scoring the model of iteration " + i + "...");
+			policyPruner.clearStatistics();
+			// test on validation to get the score
+			if (learnerName.equals("lambdamart")) {
+				String prunModelName = modelFileNames.get(i);
+				String[] tstOpts = { "TurnOffCandidateDiscrepancyCollection", "-useRanklib", "0", "-useSvmrank", "1",
+						             "-prunRankerName", "lambdamart",  "-prunModelPath", prunModelName };
+				policyPruner.testAll(finalTestDocs, "",  tstOpts);
+			} else if (learnerName.equals("svmrank")) {
+				String prunModelName = modelFileNames.get(i);
+				String[] tstOpts = { "TurnOffCandidateDiscrepancyCollection", "-useRanklib", "0", "-useSvmrank", "1", 
+						            "-prunRankerName", "svmrank", "-prunModelPath", prunModelName };
+				policyPruner.testAll(finalTestDocs, "",  tstOpts);
+			} else {
+				throw new RuntimeException("What's the learner's name???");
+			}
+			
+			
+			String prunPerfm = policyPruner.getPruningPerformance();
+			allprunperf[i] = prunPerfm;
+			System.out.println("Iteration " + i + " scores:");
+			System.out.println("Pruner accuracy " + allprunperf[i]);
+			
+			// for logfile
+			logPrinter.println("===============================================");
+			logPrinter.println("ValidatingDocs: " + validDocs.size());
+			logPrinter.println("Iteration " + i + " scores:");
+			logPrinter.println("Pruner accuracy " + allprunperf[i]);
+			logPrinter.println("modelName: " + modelFileNames.get(i));
+			logPrinter.println("===============================================");
+			// record the performce and model path
+
+			
+			String[] words = allprunperf[i].split(" ");
+			modelPerformce.put(i, Double.parseDouble(words[1]));
+			modelPath.put(i, modelFileNames.get(i));
+			
+			// scoring ...
+			//System.out.println("Scoring for iteration " + i + "...");
+			//double[] bcubeScore = bcubeScorer.score(false, new DocArray2DocIterable(finalTestDocs));
+			//double bcubeF1 = bcubeScore[2];
+			//double[] mucScore = mucScorer.score(false, new DocArray2DocIterable(finalTestDocs));
+			//double mucF1 = mucScore[2];
+			//double[] ceafScore = ceafScorer.score(false, new DocArray2DocIterable(finalTestDocs));
+			//double ceafF1 = ceafScore[2];
+			/////////////////////////
+			//allscores[i][0] = bcubeScore;
+			//allscores[i][1] = mucScore;
+			//allscores[i][2] = ceafScore;
+			//allBCubeF1.add(bcubeF1);
+			//allMucF1.add(mucF1);
+			//allCeafF1.add(ceafF1);
+			//System.out.println("Iteration " + i + " scores:");
+			//System.out.println("BCube " + bcubeScore[0] + "|" + bcubeScore[1] + " = " + bcubeScore[2]);
+			//System.out.println("MUC   " + mucScore[0] + "|" + mucScore[1] + " = " + mucScore[2]);
+			//System.out.println("CEAF  " + ceafScore[0] + "|" + ceafScore[1] + " = " + ceafScore[2]);
+
+
+			break; // use Precision@k metric, no iterations anymore
+		}
+		
+		// Have a look the score
+		System.out.println("/////////////////////////////////////////////////");
+		System.out.println("////  Scores on all the iterations //////////////");
+		System.out.println("/////////////////////////////////////////////////");
+		for (i = 0; i < N_Policy_Pruner_Iteration; i++) {
+			System.out.println("Iteration " + i + " scores:");
+			System.out.println("Pruner accuracy " + allprunperf[i]);
+		}
+		
+		
+		// some post process ...
+		// 1) delete some temp files
+		for (String path : prunMergeFeatFiles) {
+			//deleteFile(path); // delete merged files after each iteration
+		}
+		for (String path : prunFeatFileNames) {
+			deleteFile(path); // delete training files after each iteration
+		}
+		
+/*
+		// which one is the best?
+		ArrayList<Double> allBCubeF1 = new ArrayList<Double>();
+		ArrayList<Double> allMucF1 = new ArrayList<Double>();
+		ArrayList<Double> allCeafF1 = new ArrayList<Double>();
+		double[][][] allscores = new double[16][3][3];
+		ArrayList<Document> finalTestDocs = validDocs;
+		
+		for (i = 0; i < N_Dagger_Iteration; i++) {
+			System.out.println("Begin to scoring the model of iteration " + i + "...");
+			
+			// test on validation to get the score
+			if (learnerName.equals("lambdamart")) {
+				String modelFN = modelFileNames.get(i);
+				String[] tstOpts = { "TurnOffCandidateDiscrepancyCollection", "-useRanklib", "1", "-useSvmrank", "0", "-modelFileName", modelFN };
+				policyPruner.testAll(finalTestDocs, "",  tstOpts);
+			} else if (learnerName.equals("svmrank")) {
+				String modelFN = modelFileNames.get(i);
+				String[] tstOpts = { "TurnOffCandidateDiscrepancyCollection", "-useRanklib", "0", "-useSvmrank", "1", "-modelFileName", modelFN };
+				policyPruner.testAll(finalTestDocs, "",  tstOpts);
+			} else {
+				throw new RuntimeException("What's the learner's name???");
+			}
+
+			// scoring ...
+			System.out.println("Scoring for iteration " + i + "...");
+			double[] bcubeScore = bcubeScorer.score(false, new DocArray2DocIterable(finalTestDocs));
+			double bcubeF1 = bcubeScore[2];
+			double[] mucScore = mucScorer.score(false, new DocArray2DocIterable(finalTestDocs));
+			double mucF1 = mucScore[2];
+			double[] ceafScore = ceafScorer.score(false, new DocArray2DocIterable(finalTestDocs));
+			double ceafF1 = ceafScore[2];
+			/////////////////////////
+			allscores[i][0] = bcubeScore;
+			allscores[i][1] = mucScore;
+			allscores[i][2] = ceafScore;
+			allBCubeF1.add(bcubeF1);
+			allMucF1.add(mucF1);
+			allCeafF1.add(ceafF1);
+			System.out.println("Iteration " + i + " scores:");
+			System.out.println("BCube " + bcubeScore[0] + "|" + bcubeScore[1] + " = " + bcubeScore[2]);
+			System.out.println("MUC   " + mucScore[0] + "|" + mucScore[1] + " = " + mucScore[2]);
+			System.out.println("CEAF  " + ceafScore[0] + "|" + ceafScore[1] + " = " + ceafScore[2]);
+		}
+		// Have a look the score
+		
+		System.out.println("/////////////////////////////////////////////////");
+		System.out.println("////  Scores on all the iterations //////////////");
+		System.out.println("/////////////////////////////////////////////////");
+		for (i = 0; i < N_Dagger_Iteration; i++) {
+			System.out.println("Iteration " + i + " scores:");
+			System.out.println("BCube " + allscores[i][0][0] + "|" + allscores[i][0][1] + " = " + allscores[i][0][2]);
+			System.out.println("MUC   " + allscores[i][1][0] + "|" + allscores[i][1][1] + " = " + allscores[i][1][2]);
+			System.out.println("CEAF  " + allscores[i][2][0] + "|" + allscores[i][2][1] + " = " + allscores[i][2][2]);
+		}
+*/
+		
+	}
+
+	private void lamdaMARTTrain(String argue)
+	{
+		String strArgs[] = argue.split("\\s+");
+		System.out.println("RankLib running arguement: "+argue);
+		for (String sr : strArgs) {
+			System.out.println(sr);
+		}
+		Evaluator.main(strArgs);
+	}
+	
+	private void svmrankTrain(ArrayList<Document> validDocs, String featureFile, String weightPath)
+	{
+		double[] possibleC = { 0.0001, 0.001, 0.01, 0.1, 1.0, 10};//, 100 };
+		//String modelPath
+		ArrayList<String> allModelNames = new ArrayList<String>();
+		ArrayList<String> allWeightNames = new ArrayList<String>();
+		int bestIdx = -1;
+		double bestBCube = -Double.MAX_VALUE;
+		
+		// validation
+		for (int i = 0; i < possibleC.length; i++) {
+			double currentBCubeF1 = -Double.MAX_VALUE;
+			// ==================================================
+			System.out.println("Running the validation with C " + possibleC[i]);
+			
+			// train firstly
+			System.out.println("Training ...");
+			//String featFile = featFolderPath
+			String modelName = modelFolderPath + "/model-c" + String.valueOf(possibleC[i])+".txt"; 
+			String weightName = modelFolderPath + "/weight-c" + String.valueOf(possibleC[i])+".txt"; 
+			allModelNames.add(modelName); // record
+			allWeightNames.add(weightName); // record
+			svmrnkLearner.runSvmrankLearn(featureFile, possibleC[i], modelName, weightName);
+			System.out.println("Done training ...");
+			
+			// test on validation to get the score
+			System.out.println("Tesing as the validation ...");
+			String[] validOpts = { "TurnOffCandidateDiscrepancyCollection", "-useRanklib", "0", "-useSvmrank", "1", "-modelFileName", weightName };
+			policyPruner.testAll(validDocs, "",  validOpts);
+			// scoring ...
+			System.out.println("Scoring ...");
+			double[] bcubeScore = bcubeScorer.score(false, new DocArray2DocIterable(validDocs));
+			double bcubeF1 = bcubeScore[2];
+			currentBCubeF1 = bcubeF1;
+			System.out.println("C = " + possibleC[i] + " validation bcube score = " + bcubeF1);
+			
+			
+			// pick best
+			if (currentBCubeF1 > bestBCube) {
+				bestBCube = currentBCubeF1;
+				bestIdx = i;
+				System.out.println("current best C = " + possibleC[i]);
+				System.out.println("current bcube score = " + bestBCube);
+			}
+		}
+		
+		System.out.println("best C = " + possibleC[bestIdx] + ", best validation bcube score = " + bestBCube);
+		
+		// copy the best model with
+		String copyCmd = "cp " + allWeightNames.get(bestIdx) + " " + weightPath;
+		System.out.println("Copy the best model: " + copyCmd);
+		runExe(copyCmd);
+	}
+
+	
+	private void runExe(String arg)
+	{
+        Process p;
+		try {
+			p = Runtime.getRuntime().exec(arg);
+			p.waitFor();
+		} catch (IOException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		} catch (InterruptedException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		}
+	}
+	
+/*
+	/// copied from Driver.Java
+	public List<File> getValidFiles(SystemConfig cfg)
+	{
+		String validDirectory = cfg.getValidDir();
+		String validFiles = cfg.getValidLst();
+		if (validDirectory != null && validFiles != null) {
+			return getFiles(validDirectory, validFiles);
+		}
+		else {
+			return Lists.newArrayList();
+		}
+	}
+	public static List<File> getFiles(String root, String fileListFileName)
+	{
+		if (root == null || fileListFileName == null) return null;
+		// read in and create an array of directory names
+		ArrayList<File> fileNames = Lists.newArrayList();
+		try {
+			for (String file : LineIterable.iterateOverCommentedLines(new File(fileListFileName))) {
+				file = file.trim();
+				if (file != null && file.length() > 0) {
+					File trFile = new File(root, file);
+					System.out.print("New trFile: "+root+"/"+file);
+					fileNames.add(trFile);
+				} else {
+					System.out.print("File error: "+file);
+				}
+			}
+		}
+		catch (Exception e) {
+			throw new RuntimeException(e);
+		}
+		return fileNames;
+	}
+	*/
+	private void deleteFile(String path) {
+		File f = new File(path);
+		try {
+			new DataOutputStream(new FileOutputStream(f));
+		} catch (FileNotFoundException e) {
+			e.printStackTrace();
+		}
+		if (f.exists()) {
+			System.out.println("Deleting " + f.getAbsoluteFile());
+			if (!f.delete()) {
+				System.out.println("Please close the occupied file stream for " + f.getAbsoluteFile() + "!");
+			} else {
+				System.out.println(f.getName()+" has been delete succesfully!");
+			}
+		}
+	}
+
+	// output
+	public String getBestPrunerModelPath()
+	{
+		double bestScore = -Double.MAX_VALUE;
+		String bestPath  = "unknown_path";
+		for (int i = 0; i < N_Policy_Pruner_Iteration; i++) {
+			double score = modelPerformce.get(i);
+			String path = modelPath.get(i);
+			if (score > bestScore) {
+				bestScore = score;
+				bestPath = path;
+			}
+		}
+		return bestPath;
+	}
+	public String getBestPrunerPerformance()
+	{
+		double bestScore = -Double.MAX_VALUE;
+		for (int i = 0; i < N_Policy_Pruner_Iteration; i++) {
+			double score = modelPerformce.get(i);
+			modelPath.get(i);
+			if (score > bestScore) {
+				bestScore = score;
+			}
+		}
+		
+		return String.valueOf(bestScore);
+	}
+}
+

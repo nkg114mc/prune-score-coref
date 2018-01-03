@@ -1,0 +1,5379 @@
+package reconcile.structuredClassifiers;
+
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
+import java.io.FileReader;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
+import java.io.PrintStream;
+import java.io.PrintWriter;
+import java.io.Reader;
+import java.io.Writer;
+import java.text.DecimalFormat;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Random;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.TreeSet;
+import java.util.Map.Entry;
+
+import javax.management.RuntimeErrorException;
+import com.google.common.collect.Lists;
+
+import reconcile.Constructor;
+import reconcile.SystemConfig;
+import reconcile.berkeley.BerkeleyFeatureGenerator;
+import reconcile.classifiers.Classifier;
+import reconcile.data.Annotation;
+import reconcile.data.AnnotationSet;
+import reconcile.data.AnnotationWriterBytespan;
+import reconcile.data.Document;
+import reconcile.featureVector.ClusterFeature;
+import reconcile.featureVector.Feature;
+import reconcile.features.Binarizer;
+import reconcile.features.FeatureUtils;
+import reconcile.features.VicentNgBinarizer;
+import reconcile.features.FeatureUtils.AnimacyEnum;
+import reconcile.features.FeatureUtils.GenderEnum;
+import reconcile.features.FeatureUtils.NumberEnum;
+import reconcile.features.FeatureUtils.PersonPronounTypeEnum;
+import reconcile.features.properties.Animacy;
+import reconcile.features.properties.Gender;
+import reconcile.features.properties.InfWords;
+import reconcile.features.properties.Number;
+import reconcile.features.properties.ParNum;
+import reconcile.features.properties.ProperName;
+import reconcile.features.properties.ProperNameType;
+import reconcile.features.properties.Property;
+import reconcile.features.properties.SentNum;
+import reconcile.features.properties.Words;
+import reconcile.general.Constants;
+import reconcile.general.RuleResolvers;
+import reconcile.general.UnionFind;
+import reconcile.general.Utils;
+import reconcile.scorers.DocumentPair;
+import reconcile.scorers.InternalScorer;
+import reconcile.scorers.LeanDocument;
+import reconcile.scorers.Matcher;
+import reconcile.scorers.Scorer;
+import reconcile.scorers.Matcher.MatchStyleEnum;
+import reconcile.structuredClassifiers.PolicyLog.PolicyRankingSample;
+import reconcile.util.DocArray2DocIterable;
+import reconcile.util.File2DocIterable;
+import reconcile.weka.classifiers.functions.WeightVectorApplier;
+
+
+/**
+ * @author Chao Ma
+ * 
+ */
+
+public class GreedyPrun extends StructuredClassifier {
+	private static final boolean INIT = true;
+	private static double[] classifierWeights, weightVector;
+	private static String cachedModelName = "no file", weightsFile;
+	private static long modelTimestamp = 0;
+	public static Random rand = new Random(System.currentTimeMillis());
+	private static Binarizer binarizer;
+	private static VicentNgBinarizer VNbinarizer;
+	private static Scorer scorer; 
+	private static Scorer zerooneScorer; // specific scorer
+	private static Scorer mucScorer;     // specific scorer
+	private static Scorer bcubeScorer;   // specific scorer
+	private static Scorer bcubConllScorer;
+	static double gamma = 0.5;
+	private static double REG_BETA = 5e-5; 
+	private static boolean PERCEPTRON = true;
+	static boolean PERCEPTRON_MAX = true;
+	public static boolean MAX_MARGIN = true;
+	private static boolean UPDATE_AVE = true;
+	static int NUM_UPDATES = 1;
+	static int N_updates = 0;
+	private static double C=1;
+	private static double M = 0.2;
+	private static boolean SINGLE_ITER = false;
+	private static double rate = .05; 
+	static double learnRate = .01; 
+	private static double confLearnRate = 0.01;
+	private static int numDocIters = 1, NUM_TRAIN_ITERS=1, NUM_CONF_ITERS=10;
+	static boolean DEBUG = false;
+	static boolean TIME_PROFILING=false;
+	private static boolean RESOLVE_DEBUG=false, CONF_TRAIN=false, SEARN = false; 
+	private static boolean individualUpdates = false;
+	static DecimalFormat df = new DecimalFormat(".####");
+
+	
+	private static int policyDecisionMistake = 0; // number of mistakes the policy made
+	private static int policyTTotalDecision = 0;  // number of calling policy
+	private static int filterTruePos = 0;
+	private static int filterTrueNeg = 0;
+	private static int filterFalsePos = 0;
+	private static int filterFalseNeg = 0;
+	// filter ranking
+	private static int allFilterRankingPairs = 0;
+	private static int correctFilterRankingPairs = 0;
+	private static int filterQID = 0;
+	
+	
+	private boolean  weightHasLoaded = false;
+	private double[] proNounWeight = null;
+	private double[] norNounWeight = null;
+	
+	private boolean percetron_pruner_online = false;
+	private double  pruner_learning_rate = 0.01;
+	private double[] prunerWeight = null;
+	private double[] gSumWeight = null;
+	private double[] gAvgWeight = null;
+	private double   nPrunerUpdate = 0;
+	
+	private static String RANKER_MODEL_PATH = "";
+	private boolean useUmassRanker = false;
+	UMassRankLib UmassRankers = new UMassRankLib();
+	
+	// about pruning
+	private int pruningFactor = 0; // default 4
+	private int totalPrunningStep = 0;
+	private int goodPrunningStep = 0;
+	private boolean prunUseRanklib = false;
+	UMassRankLib prunRanker = new UMassRankLib();
+	
+	
+	private boolean prunerAssemble = false;
+	UMassRankLib[] assemPruners = new UMassRankLib[8];
+	
+	
+	private boolean readyToTesting = false;
+
+	private double scoreSummation = 0; // a variable that cache the sum of all action scores (probably be used as a heuristic)
+	
+	String clusterFeatures[]={"SameGender", "CompatibleGender", "IncompatibleGender", "SameNumber", "CompatibleNumber", "IncompatibleNumber",
+			"IncompatiblePersonName","SameAnimacy", "CompatibleAnimacy", "IncompatibleAnimacy", "SameSemType", "CompatibleSemType",// "IncompatibleSemType",
+			"HeadMatch", "ProperName", "PNStr", "PNSubstr", "PNIncomp", "ContainsPN"
+			,"Constraints"
+			//, "ChainSize1", "ChainSize2", "CombinedSize"
+			//      ,"ChainSize1GT5", "ChainSize1LTE1", "ChainSize1LTE2", "ChainSize1LTE3", "ChainSize1LTE5"
+			//, "ChainSize1LTE1", "ChainSize2LTE1"
+			//      ,"ChainSize2GT5", "ChainSize2LTE1", "ChainSize2LTE2", "ChainSize2LTE3", "ChainSize2LTE5"
+			//,"CombinedSizeGT20","CombinedSizeLTE2","CombinedSizeLTE3","CombinedSizeLTE4","CombinedSizeLTE5","CombinedSizeLTE10","CombinedSizeLTE20"
+			//,"NormChainSize1","NormChainSize2"
+			//      ,"ParSizeLTE1","ParSizeLTE2","ParSizeLTE3","ParSizeLTE5","ParSizeGT5"
+			//      ,"ParSize2LTE1","ParSize2LTE2","ParSize2LTE3","ParSize2LTE5","ParSize2GT5"
+			,"PairTypeEE","PairTypeEL","PairTypeEP","PairTypeLL","PairTypeOE"
+			,"PairTypeNE","PairTypeNL","PairTypeNP","PairTypeNO","PairTypeNN"
+			,"PairTypeOL","PairTypeOO","PairTypeOP","PairTypePP","PairTypeLP"
+			,"NormCombinedSize", "PossibleAnte"
+			//,"ProResolveCl"
+			,"ProResolveRuleR1","ProResolveRuleR2","ProResolveRuleR3","ProResolveRuleR5","ProResolveRuleR6","ProResolveRuleR7","ProResolveRuleR8"
+			,"Demonyms", "CountryCapital", "WordSubstr", "HeadWordSubstr", "Modifier", "PostModifier"//, "Confidence","Confidence1","Confidence2"
+	};
+	
+	String pairwiseFeatures[] = {
+			"SoonStr", "Modifier", "PostModifier", "WordsSubstr",
+			//WordsStr, WordOverlap, , ExactStrMatch
+			//FEATURE_NAMES=PNStr, PNSubstr
+			"Pronoun1", "Pronoun2", "Definite1", "Definite2", "Demonstrative2",	"Embedded1", "Embedded2", "InQuote1", "InQuote2",
+			"BothProperNouns", "BothEmbedded", "BothInQuotes", "BothPronouns", "BothSubjects", 
+			"Subject1", "Subject2", "Appositive", "RoleAppositive", "MaximalNP", "IwithinI",
+			"SentNum0", "SentNum1", "SentNum2", "SentNum3", "SentNum4plus", "ParNum0", "ParNum1", "ParNum2plus" ,
+			"Acronym", "Alias", "IAntes", "WeAntes", "BothYou", "Span", "Binding", "Contraindices", "Syntax", "ClosestComp" ,
+			"Indefinite", "Indefinite1", "Prednom", "Pronoun", "ProperNoun" ,
+			//ContainsPN
+			//, ProperName
+			"WordNetClass", "WordNetDist", "WordNetSense", "Subclass", "AlwaysCompatible",
+			//FEATURE_NAMES=RuleResolve 
+			//FEATURE_NAMES=SameSentence, ConsecutiveSentences
+			"WNSynonyms",
+			//FEATURE_NAMES=ProResolve, ProResolveRule 
+			"Quantity",
+			//FEATURE_NAMES=HeadMatch 
+			"WhoResolve", "WhichResolve",
+			"PairType",
+			"DeterminerHeadMatch", "Longer2", "LongerPN2", "ShorterPN2", "InOfRelation"//,"__PairType__SentNum"
+	};
+	
+	// about prunner
+	PrintWriter prunerFeatPrinter = null;
+	
+	
+	// feature log
+	int globleQID = 0;
+	PrintWriter featureVecPrinter = null;
+	PrintWriter featProVecPrinter = null;
+	PrintWriter logPrinter = null;
+	ArrayList<String> featNames = null;// new ArrayList<String>();
+	HashMap<String, Double> featWeights = null;// new ArrayList<String>();
+	
+	// entity feature generator
+	//EntityPropertyFeatureGen entityFeatureGen = new EntityPropertyFeatureGen();
+	BerkeleyFeatureGenerator bkleyFeatureGen = new BerkeleyFeatureGenerator();
+	
+	// for LDS  ================================================================================
+	private boolean collectCandidateDiscrepancy = false;
+	private HashMap<Integer, ArrayList<DiscrepancyItem>> CandidateDiscrepancy = new HashMap<Integer, ArrayList<DiscrepancyItem>>();
+	private HashMap<Integer, Double> policyDecisionConfidence = new HashMap<Integer, Double>();
+	// this flag determine whether the policy will collect
+	//  all other possible Links for rather than the current best one
+	public void setCandidateDiscredancyFlag(boolean value)
+	{
+		collectCandidateDiscrepancy = value;
+	}
+	public boolean getCandidateDiscredancyFlag()
+	{
+		return collectCandidateDiscrepancy;
+	}
+	
+	public HashMap<Integer, ArrayList<DiscrepancyItem>> getCandidateDiscredancy()
+	{
+		return CandidateDiscrepancy;
+	}
+	
+	public HashMap<Integer, Double> getPolicyDecisionConfidence()
+	{
+		// updated with the CandidateDiscrepancy at the same time
+		return policyDecisionConfidence;
+	}
+	
+	private Boolean useFirstbestPairScore = null;
+	private boolean getPairComparatorName()
+	{
+		if (useFirstbestPairScore == null) {
+			useFirstbestPairScore = Utils.getConfig().getBoolean("USE_BESTFIRST", false);
+			System.out.println("USE_BESTFIRSTE = " + useFirstbestPairScore);
+		}
+		return (useFirstbestPairScore.booleanValue());
+	}
+	// =========================================================================================
+	
+	List<ClusterFeature> clFeatures;
+	List<Feature> localFeatures;
+	private int numLocalFeatures;
+	public static int confFeatNumber;
+
+	public class DocumentActions{
+		public ActionList actions;
+		public HashMap<Integer, CorefChain> chains;
+		public double reward;
+	}
+	
+	public class StringArguement {
+		public String featFileName = null;
+		public String modelFileName = null;
+		public String learnAlgorithm = null;
+		public int    daggerIteration = -1;
+		public int    useRanklib = -1;
+		public int    useSvmrank = -1;
+		public double daggerBeta = -1;
+		
+		// about pruner
+		public int    prunIter  = 0;
+		public String prunFeatFileName = null;
+		public int    prunBeamSize = -1;
+		public int    prunLearning = -1; // boolean 0: false, 1:true, -1 unknown
+		public String prunModelPath = null;
+		public String prunRankerName = null; // svmrank or lamdamart
+	}
+	
+	// arguments coming from the string options
+	public StringArguement strOptions = new StringArguement();
+
+	// =========================================================================================
+	// policy hash
+	private boolean usePolicyHash = false;
+	//private PolicyHashTable policyHashTb = new PolicyHashTable();
+	// =========================================================================================
+	
+	// =========================================================================================
+	// Policy Error check
+	private boolean pruning_classifier = collectCandidateDiscrepancy;//true; false;
+	HashMap<Integer, Integer> policyMistakeIndicator = new HashMap<Integer, Integer>();
+	// convert the policy into discrepancies
+	HashMap<Integer, DiscrepancyItem> policyDecisionAsDiscrepancy = new HashMap<Integer, DiscrepancyItem>();
+	public boolean getPolicyMistakeIndicatorFlag()
+	{
+		return pruning_classifier;
+	}
+	public void setPolicyMistakeIndicatorFlag(boolean value)
+	{
+		pruning_classifier = value;
+	}
+	public HashMap<Integer, Integer> getMistakeIndicator()
+	{
+		return policyMistakeIndicator;
+	}
+	// =========================================================================================
+	
+	// this data structure is to visualize the action history of the policy
+	// policy action log ====================================================================
+	PolicyLog policyhistoryLog = new PolicyLog();
+	// ======================================================================================
+	
+	// ============================
+	// 2013 11 15
+	public double getPolicyScoreSum()
+	{
+		return scoreSummation;
+	}
+	// ============================
+	
+	private List<ClusterFeature> getClusterFeatures(){
+		if(clFeatures==null){
+			clFeatures = Constructor.createClusterFeatures(clusterFeatures);
+			for(int i=0;i<clFeatures.size();i++){
+				if(clFeatures.get(i).getName().endsWith("Confidence")){
+					confFeatNumber = i;
+				}
+			}
+		}
+
+		return clFeatures;
+	}
+
+	private List<Feature> getLocalFeatures(){
+		if(localFeatures==null){
+			//localFeatures=Constructor.createFeatures(Utils.getConfig().getFeatureNames());
+			localFeatures=Constructor.createFeatures(pairwiseFeatures);
+		}
+		return localFeatures;
+	}
+
+	private Binarizer getBinarizer(){
+		if(binarizer==null){
+			binarizer=new Binarizer(getLocalFeatures());
+		}
+		return binarizer;
+	}
+	
+	private VicentNgBinarizer getVNBinarizer(){
+		if(VNbinarizer==null){
+			VNbinarizer =new VicentNgBinarizer(getLocalFeatures());
+		}
+		return VNbinarizer;
+	}
+
+	double[] getFeatureVector(CorefChain c1, CorefChain c2, Document doc, boolean inclStructured){
+		boolean ifprint = false;
+		List<ClusterFeature> feats = getClusterFeatures();
+		double[] result = new double[feats.size()];
+		HashMap<ClusterFeature, String> featVector = new HashMap<ClusterFeature, String>();
+		for(int i=0; i<feats.size();i++){
+			if(inclStructured||!feats.get(i).structuredOnly())
+				result[i]=Double.parseDouble(feats.get(i).getValue(c1, c2, doc, featVector));
+			else
+				result[i]=0.0;
+		}
+		// print features  
+		if(ifprint) {
+			printFeatureValues(featVector);
+		}
+		return result;
+	}
+
+	private double[] getLocalFeatureVector(Annotation np1, Annotation np2, Document doc){
+		List<Feature> feats = getLocalFeatures();
+		HashMap<Feature, String> featVector = new HashMap<Feature, String>();
+		for(int i=0; i<feats.size();i++){
+			feats.get(i).getValue(np1, np2, doc, featVector);
+		}
+		return getBinarizer().binarize(featVector);
+	}
+
+	/*
+	private double[] getEntityFeatureVector(Document doc, AnnotationSet ces, CorefChain entity, boolean emptyEntity)
+	{
+		double[] fv = null;
+		if (emptyEntity) {
+			fv = entityFeatureGen.evaluateEntity(doc, ces, entity);
+		} else {
+			fv = entityFeatureGen.evaluateEntityEmptyVector();
+		}
+		return fv;
+	}
+	*/
+	
+	@SuppressWarnings("unused")
+	private double[] loadClassifier(String modelInputFile, int numAtts)
+	{
+		if (modelInputFile == null) modelInputFile = mModelFile;
+		if (mModelFile==null||!mModelFile.equals(modelInputFile)) {
+			mModelFile = modelInputFile;
+			readClassifier(modelInputFile, numAtts);
+		}
+		else {
+			if(classifierWeights==null)
+				readClassifier(modelInputFile, numAtts);
+		}
+		return classifierWeights;
+	}
+
+	private double[] loadWeights(String wInputFile)
+	{
+		if (wInputFile == null) wInputFile = weightsFile;
+		if (weightsFile==null || !weightsFile.equals(wInputFile)) {
+			weightsFile = wInputFile;
+			readWeights(wInputFile);
+		}
+		else {
+			if(weightVector==null)
+				readWeights(wInputFile);
+		}
+		return weightVector;
+	}	
+
+	private double[] loadSearchWeights(String wInputFile)
+	{
+		double[] w = new double[256];
+		if (wInputFile == null) wInputFile = weightsFile;
+		if (weightsFile==null || !weightsFile.equals(wInputFile)) {
+			weightsFile = wInputFile;
+			w = readSearchWeights(wInputFile);
+		}
+		else {
+			if(weightVector==null) {
+				w = readSearchWeights(wInputFile);
+			}
+		}
+		return w;
+	}	
+
+	private double[] readSearchWeights(String modelInputFile)
+	{
+		double[] readweight = new double[256];
+		String wFilename=modelInputFile;
+		int numAttr=0;
+		boolean check=false;
+		ArrayList<Double> weights = new ArrayList<Double>();
+		//System.out.println("Reading classifier from "+wFilename);
+		try {
+			BufferedReader file;
+			try {
+				file = new BufferedReader(new InputStreamReader(WeightVectorApplier.class.getResourceAsStream(wFilename)));
+			}
+			catch(NullPointerException npe) {
+				file = new BufferedReader(new FileReader(wFilename));       
+			}
+
+			String line;
+			while ((line = file.readLine()) != null) {
+				double w = Double.parseDouble(line.split("=")[1]);
+				weights.add(new Double(w));
+			}
+			file.close();
+			double[] result;
+			if(numAttr==0){
+				result = new double[weights.size()];
+				numAttr = weights.size();
+			}else
+				result = new double[numAttr];
+
+			for (int y = 0; y < numAttr; y++) {
+				result[y] = (weights.get(y)).doubleValue();
+			}
+			readweight = result;
+		} catch (IOException ioe) {
+			throw new RuntimeException(ioe);
+		}
+		return readweight;
+	}
+	
+	private void readClassifier(String modelInputFile, int numAtts)
+	{
+		System.out.println("Reading classifier from file " + modelInputFile);
+		cachedModelName = modelInputFile;
+		modelTimestamp = System.currentTimeMillis();
+		classifierWeights = WeightVectorApplier.readWeightVector(modelInputFile, numAtts, true);
+	}
+
+	private void readWeights(String modelInputFile)
+	{
+		String wFilename=modelInputFile;
+		int numAttr=0;
+		boolean check=false;
+		ArrayList<Double> weights = new ArrayList<Double>();
+		System.out.println("Reading classifier from "+wFilename);
+		try {
+			BufferedReader file;
+			try {
+				file = new BufferedReader(new InputStreamReader(WeightVectorApplier.class.getResourceAsStream(wFilename)));
+			}
+			catch(NullPointerException npe) {
+				file = new BufferedReader(new FileReader(wFilename));       
+			}
+
+			String line;
+			while ((line = file.readLine()) != null) {
+				double w = Double.parseDouble(line.split("=")[1]);
+				weights.add(new Double(w));
+			}
+			file.close();
+			if(weights.size()!=numAttr&&weights.size()!=numAttr+1&&check){
+				throw new RuntimeException("Weight vector is wrong length "+weights.size()+" vs "+numAttr);
+			}
+			double[] result;
+			if(numAttr==0){
+				result = new double[weights.size()];
+				numAttr = weights.size();
+			}else
+				result = new double[numAttr];
+
+			for (int y = 0; y < numAttr; y++) {
+				result[y] = (weights.get(y)).doubleValue();
+			}
+
+			weightVector = result;
+		} catch (IOException ioe) {
+			throw new RuntimeException(ioe);
+		}
+	}
+	
+	private void parseOptions(String optionStr[])
+	{
+		// all default
+		strOptions.featFileName = null;
+		strOptions.modelFileName = null;
+		strOptions.learnAlgorithm = null;
+		strOptions.daggerIteration = -1;
+		strOptions.useRanklib = -1;
+		strOptions.useSvmrank = -1;
+		strOptions.daggerBeta = -1;
+		
+		strOptions.prunIter  =-1;
+		strOptions.prunFeatFileName = null;
+		strOptions.prunBeamSize = -1;
+		strOptions.prunLearning = -1; // boolean 0: false, 1:true, -1 unknown
+		strOptions.prunModelPath = null;
+		strOptions.prunRankerName = null;
+		
+		// begin to parse
+		if (optionStr != null) {
+			for (int i = 0; i < optionStr.length; i++) {
+				if (optionStr[i] != null) {
+					if (optionStr[i].equals("TurnOnCandidateDiscrepancyCollection")) {
+						this.setCandidateDiscredancyFlag(true);
+					} else if (optionStr[i].equals("TurnOffCandidateDiscrepancyCollection")) {
+						this.setCandidateDiscredancyFlag(false);
+					} else if (optionStr[i].equals("-modelFileName")) {
+						strOptions.modelFileName = optionStr[i + 1];
+					} else if (optionStr[i].equals("-policyFeatFN")) {
+						strOptions.featFileName = optionStr[i + 1];
+					} else if (optionStr[i].equals("-daggerIter")) {
+						strOptions.daggerIteration = Integer.parseInt(optionStr[i + 1]);
+					} else if (optionStr[i].equals("-daggerBeta")) {
+						strOptions.daggerBeta = Double.parseDouble(optionStr[i + 1]);	// beta
+					} else if (optionStr[i].equals("-useRanklib")) {
+						strOptions.useRanklib = Integer.parseInt(optionStr[i + 1]);
+					} else if (optionStr[i].equals("-useSvmrank")) {
+						strOptions.useSvmrank = Integer.parseInt(optionStr[i + 1]);
+					
+					// about prun
+					} else if (optionStr[i].equals("-prunIter")) {
+						strOptions.prunIter = Integer.parseInt(optionStr[i + 1]);
+					} else if (optionStr[i].equals("-prunBeamSize")) {
+						strOptions.prunBeamSize = Integer.parseInt(optionStr[i + 1]);
+					} else if (optionStr[i].equals("-prunFeatFN")) {
+						strOptions.prunFeatFileName = optionStr[i + 1];
+					} else if (optionStr[i].equals("-prunLearning")) {
+						strOptions.prunLearning = Integer.parseInt(optionStr[i + 1]);
+					} else if (optionStr[i].equals("-prunModelPath")) {
+						strOptions.prunModelPath = optionStr[i + 1];
+					} else if (optionStr[i].equals("-prunRankerName")) {
+						strOptions.prunRankerName = optionStr[i + 1];
+					}
+				}
+			}
+		}
+	}
+	
+	public void testAll(Iterable<Document> docs, String modelInputFile, String[] options){
+		boolean inMemory = false;
+		// 1) pre-process
+		testPrepare(options);
+		// 2)resolve each
+		// gen features
+		FeatureVectorGenerator.makeFeatures(docs, false, null);
+		for (Document doc : docs) {
+			AnnotationSet result = test(doc, modelInputFile, options);
+			if(!inMemory){
+				try {
+					File out = doc.getClusterFile();
+					PrintWriter outWriter = new PrintWriter(out);
+					new AnnotationWriterBytespan().write(result, outWriter);
+				}
+				catch (IOException ioe) {
+					throw new RuntimeException(ioe);
+				}
+			}
+		}
+		// 3) post-process
+		testPostprocess();
+	}
+
+	public AnnotationSet test(Document doc, String modelInputFile, String[] options){
+		SystemConfig cfg = Utils.getConfig();
+		String scorerName = cfg.getOptimizeScorer();
+		scorer = Constructor.createScorer(scorerName);
+		PERCEPTRON = !cfg.getBoolean("ANN", false);
+		PERCEPTRON_MAX = cfg.getBoolean("PERCEPTRON_MAX", false);
+		MAX_MARGIN = cfg.getBoolean("MAX_MARGIN", false);
+		SINGLE_ITER = cfg.getBoolean("SINGLE_ITER",false);
+		parseOptions(options); // parse options! (by Chao Ma 2013-5-15)
+		//double[] w=new double[256];//loadWeights(Utils.getWorkDirectory()+"/"+Utils.getConfig().getClassifier());
+		//double[] wNeg=new double[256];//loadWeights(Utils.getWorkDirectory()+"/"+Utils.getConfig().getClassifier()+".neg");
+		String corpusName = cfg.getDataset();
+		String WEIGHT_PATH1 = cfg.getString("POLICY_NOM_WEIGHT_PATH", Utils.getWorkDirectory()+"/"+"policy.w");
+		String WEIGHT_PATH2 = cfg.getString("POLICY_RON_WEIGHT_PATH", Utils.getWorkDirectory()+"/"+"policyPro.w"); // for pronoun
+		// second level~ (2013-8-4)
+		String W2_PATH1 = cfg.getString("POLICY_NOM_SECOND_WEIGHT_PATH", Utils.getWorkDirectory()+"/"+"plcy2.w");
+		String W2_PATH2 = cfg.getString("POLICY_RON_SECOND_WEIGHT_PATH", Utils.getWorkDirectory()+"/"+"plcyPro2.w"); // for pronoun
+		// loading policy weight vector
+		if (corpusName.equals("ace04")) {
+			WEIGHT_PATH1 = cfg.getString("POLICY_NOM_WEIGHT_PATH", Utils.getWorkDirectory()+"/"+"policy_ace04.w");
+			WEIGHT_PATH2 = cfg.getString("POLICY_RON_WEIGHT_PATH", Utils.getWorkDirectory()+"/"+"policyPro_ace04.w"); // for pronoun
+			// new
+			W2_PATH1 = cfg.getString("POLICY_NOM_SECOND_WEIGHT_PATH", Utils.getWorkDirectory()+"/"+"plcy2_ace04.w");
+			W2_PATH2 = cfg.getString("POLICY_RON_SECOND_WEIGHT_PATH", Utils.getWorkDirectory()+"/"+"plcyPro2_ace04.w"); // for pronoun
+		} else if (corpusName.equals("muc6")) {
+			WEIGHT_PATH1 = cfg.getString("POLICY_NOM_WEIGHT_PATH", Utils.getWorkDirectory()+"/"+"policy_muc6.w");
+			WEIGHT_PATH2 = cfg.getString("POLICY_RON_WEIGHT_PATH", Utils.getWorkDirectory()+"/"+"policyPro_muc6.w"); // for pronoun
+			// new
+			W2_PATH1 = cfg.getString("POLICY_NOM_SECOND_WEIGHT_PATH", Utils.getWorkDirectory()+"/"+"plcy2_muc6.w");
+			W2_PATH2 = cfg.getString("POLICY_RON_SECOND_WEIGHT_PATH", Utils.getWorkDirectory()+"/"+"plcyPro2_muc6.w"); // for pronoun
+		} else if (corpusName.contains("ontonotes")) {
+		
+		} else {
+			throw new RuntimeException("Unknown dataset type!");
+		}
+		// output them
+		//System.out.println("Loading weight from: "+WEIGHT_PATH1);
+		//System.out.println("Loading weight from: "+WEIGHT_PATH2);
+		double[] weight1 = loadSearchWeights(WEIGHT_PATH1);
+		double[] weight2 = loadSearchWeights(WEIGHT_PATH2);
+		// new 
+		double[] w2Nom = loadSearchWeights(W2_PATH1);
+		double[] w2Prn = loadSearchWeights(W2_PATH2);
+		
+		// 
+		if (strOptions.useSvmrank != -1) {
+			if (strOptions.useSvmrank > 0 && strOptions.modelFileName != null) {
+				w2Nom = loadSearchWeights(strOptions.modelFileName);
+				w2Prn = loadSearchWeights(strOptions.modelFileName);
+			}
+		}
+
+		if (!readyToTesting) {
+			testPrepare();
+			readyToTesting = true;
+		}
+		return test(doc, weight1, weight2, w2Nom, w2Prn, -1);
+	}
+	public AnnotationSet test(Document doc, double[] wPos, double[] wNeg, double[] w2Nom, double[] w2Prn, int iterNum){
+		AnnotationSet ces = doc.getAnnotationSet(Constants.NP); // predict mentions?
+		//AnnotationSet ces = doc.getAnnotationSet(Constants.GS_NP);   // glod mentions
+		resolve(doc, ces, wPos, wNeg, w2Nom, w2Prn, false, iterNum, false);
+		return ces;
+	}
+	/*
+	public double score(Iterable<Document> docs, double[] wPos, double[] wNeg, int iterNum){
+		int numDocs = 0;
+		for(Document doc:docs){
+			//if(numDocs==18||numDocs==17) DEBUG=true;
+			AnnotationSet ces = test(doc,wPos,wNeg, iterNum);
+			doc.addAnnotationSet(ces, Constants.CLUSTER_FILE_NAME, false);
+			if(RESOLVE_DEBUG){
+				System.out.println("Writing out EF output");
+				ces.setName("coref_output_ef"+iterNum);
+				doc.writeAnnotationSet(ces);
+			}
+			//DEBUG=false;
+			numDocs++;
+		}
+		double[] result=scorer.score(false, docs);
+		return result[Scorer.F];
+	}
+	*/
+	public double intialScore(Iterable<Document> docs){
+		double result = 0;
+		int numDocs = 0;
+		for(Document doc:docs){
+			//if(numDocs==18||numDocs==17) DEBUG=true;
+			AnnotationSet ces = doc.getAnnotationSet(Constants.NP);
+			//System.out.println(ces);
+			result+=getScore(ces, doc);
+			numDocs++;
+		}
+		return result/(double)numDocs;
+	}
+	
+	public int numChains(HashMap<Integer,CorefChain> chains){
+		int num=0;
+		for(CorefChain c:chains.values()){
+			if(!c.isRedirect())
+				num++;
+		}
+		return num;
+	}
+	public int numChains(AnnotationSet ans){
+		HashSet<Integer> ids = new HashSet<Integer>();
+		for(Annotation an:ans){
+			ids.add(Integer.parseInt(an.getAttribute(Constants.CLUSTER_ID)));
+		}
+		return ids.size();
+	}
+	
+	public int doTry(HashMap<Integer,CorefChain> chains, Document doc, AnnotationSet ces, Action act)
+	{
+		CorefChain c1 = chains.get(act.first);
+		CorefChain c2 = chains.get(act.second);
+		//if (c1 == null || c2 == null) {
+		//	System.out.println("One of the cluster is null!");
+		//}
+		/*
+		if ((c2.getProcessed() == true) && (c1.getProcessed() == false)) {
+			// Ok, do nothing
+		} else if(c2.getProcessed() == false && c1.getProcessed() == true){
+			CorefChain temp = c1;
+			c1 = c2;
+			c2 = temp; 
+		}*/
+
+		//CorefChain singleCluster = c1;
+		//CorefChain multiCluster = c2;
+		Annotation operMention = c1.getFirstCe();
+		Integer oldClusterId = Integer.parseInt(c1.getFirstCe().getAttribute(Constants.CLUSTER_ID));
+		String  c2clustId    = String.valueOf(act.second);
+		operMention.setAttribute(Constants.CLUSTER_ID, c2clustId); // singleton cluster
+
+		return oldClusterId;
+	}
+	
+	public void undoTry(HashMap<Integer,CorefChain> chains, Document doc, AnnotationSet ces, Action act, int oldclusterId)
+	{
+		CorefChain c1 = chains.get(act.first);
+		CorefChain c2 = chains.get(act.second);
+		//if (c1 == null || c2 == null) {
+		//	System.out.println("One of the cluster is null!");
+		//}
+		/*
+		if ((c2.getProcessed() == true) && (c1.getProcessed() == false)) {
+			// Ok, do nothing
+		} else if(c2.getProcessed() == false && c1.getProcessed() == true){
+			CorefChain temp = c1;
+			c1 = c2;
+			c2 = temp; 
+		}*/
+
+		//CorefChain singleCluster = c1;
+		//CorefChain multiCluster = c2;
+		Annotation operMention = c1.getFirstCe();
+		operMention.setAttribute(Constants.CLUSTER_ID, String.valueOf(oldclusterId));
+	}
+	
+	private void printMention(Annotation ce, Document doc)
+	{
+		System.out.print(ce.getAttribute(Constants.CE_ID));
+		System.out.print("<"+ce.getAttribute(Constants.CLUSTER_ID)+"> ");
+		
+    	String spanWord[] = doc.getWords(ce);
+    	for (int i = 0; i < spanWord.length; i++) {
+    		System.out.print(spanWord[i]+" ");
+    	}
+    	
+    	// mention type
+    	int startOffset = ce.getStartOffset();
+    	int endOffset = ce.getEndOffset();
+    	boolean isProNoun = FeatureUtils.isPronoun(ce, doc);
+		FeatureUtils.GenderEnum gen1 = (GenderEnum) ce.getProperty(Gender.getInstance());
+		FeatureUtils.NumberEnum num1 = (NumberEnum) ce.getProperty(Number.getInstance());
+		FeatureUtils.AnimacyEnum an1 = (AnimacyEnum) ce.getProperty(Animacy.getInstance());
+		
+		System.out.print("{");
+		System.out.print(" Offset= ("+startOffset+","+endOffset+")");
+    	System.out.print(" isPronoun = "+isProNoun);
+		System.out.print(" Gender = "+gen1.toString());
+		System.out.print(" Number = "+num1.toString());
+		System.out.print(" Animarcy = "+an1.toString());
+    	System.out.print("}");
+    	System.out.println();
+	}
+	
+	
+	private boolean isPronounAction()
+	{
+		return false;
+	}
+	private void printAction(HashMap<Integer,CorefChain> chainState, Document doc, AnnotationSet ces, Action act)
+	{
+		int ACT_MERGE = 1;
+		int ACT_NOP = 0; 
+		/*
+		if (act.getActName() == ACT_NOP) {
+			Annotation involvedMen = null;
+			CorefChain involvedClust = null;
+			CorefChain singletonClust = null;
+
+			// involved cluster
+			involvedClust = chainState.get(act.second);
+			// singleton cluster
+			singletonClust = chainState.get(act.first);
+			// involved mention
+			involvedMen = singletonClust.getFirstCe();//menClust.getFirstCe();
+				
+			boolean isProNoun = FeatureUtils.isPronoun(involvedMen, doc);
+			if (isProNoun) {
+				System.out.print("cataphora? ");printMention(involvedMen, doc);;
+			}
+			//
+			//System.out.println("Performing "+bestAction);
+		}*/
+		
+		if (act.getActName() == ACT_NOP) {
+			Annotation involvedMen = null;
+			CorefChain singletonClust = null;
+			
+			// singleton cluster
+			singletonClust = chainState.get(act.first);
+			// involved mention
+			involvedMen = singletonClust.getFirstCe();
+			
+			int mid = Integer.parseInt(involvedMen.getAttribute(Constants.CE_ID));
+			System.out.println("Policy: m_"+mid+" will stay alone.");
+
+		} else if (act.getActName() == ACT_MERGE) {
+			Annotation involvedMen = null;
+			CorefChain involvedClust = null;
+			CorefChain singletonClust = null;
+			// involved cluster
+			involvedClust = chainState.get(act.second);
+			// singleton cluster
+			singletonClust = chainState.get(act.first);
+			// involved mention
+			involvedMen = singletonClust.getFirstCe();
+			
+			int mid = Integer.parseInt(involvedMen.getAttribute(Constants.CE_ID));
+			System.out.print("Policy: m_"+mid+" will merge into cluster of { ");
+			for (Annotation ce : involvedClust.getCes()) {
+				int eid = Integer.parseInt(ce.getAttribute(Constants.CE_ID));
+				System.out.print(eid+", ");
+			}
+			System.out.println(" } ");
+		}
+	}
+	
+	private void mentionToStr(Annotation ce, Document doc, AnnotationSet ces)
+	{
+		AnnotationSet goldCes = doc.getAnnotationSet(Constants.GS_NP);
+    	Integer menID = Integer.parseInt(ce.getAttribute(Constants.CE_ID));
+    	Object matchObj = ce.getProperty(Property.MATCHED_CE);
+	    Integer match = (Integer) matchObj;
+	    if (match != -1) {
+	    	Annotation matchCe = goldCes.getAnnotationByNO(match);
+	    	Integer gclust = Integer.parseInt(matchCe.getAttribute(Constants.CLUSTER_ID));
+
+	    	// menID
+	    	System.out.print(menID);
+	    	
+	    	// gold cluster
+	    	System.out.print("<"+gclust+">  ");
+		
+	    	// span words
+	    	String spanWord[] = doc.getWords(ce);
+	    	for (int i = 0; i < spanWord.length; i++) {
+	    		System.out.print(spanWord[i]+" ");
+	    	} 
+	    	
+	    	// mention type
+	    	//FeatureUtils.PRTypeEnum mtype = (FeatureUtils.PRTypeEnum) Pronoun.getInstance().getValueProp(ce, doc);
+	    	int startOffset = ce.getStartOffset();
+	    	int endOffset = ce.getEndOffset();
+	    	boolean isProNoun = FeatureUtils.isPronoun(ce, doc);
+			FeatureUtils.GenderEnum gen1 = (GenderEnum) ce.getProperty(Gender.getInstance());
+			FeatureUtils.NumberEnum num1 = (NumberEnum) ce.getProperty(Number.getInstance());
+			FeatureUtils.AnimacyEnum an1 = (AnimacyEnum) ce.getProperty(Animacy.getInstance());
+			
+			System.out.print("{");
+			System.out.print(" Offset= ("+startOffset+","+endOffset+")");
+	    	System.out.print(" isPronoun = "+isProNoun);
+			System.out.print(" Gender = "+gen1.toString());
+			System.out.print(" Mention Number = "+num1.toString());
+			System.out.print(" Mention Animarcy = "+an1.toString());
+	    	System.out.print("}");
+	    	
+	    	System.out.println();
+	    }
+	}
+	
+	private void entityToStr(CorefChain chain, Document doc, AnnotationSet ces)
+	{
+		// ==========================================================
+
+		FeatureUtils.GenderEnum gen1 = (GenderEnum) chain.getProperty(Gender.getInstance());
+		/*if (gen1.equals(FeatureUtils.GenderEnum.MASC) && gen2.equals(FeatureUtils.GenderEnum.FEMININE)) 
+		      return true;
+		    if (gen2.equals(FeatureUtils.GenderEnum.MASC) && gen1.equals(FeatureUtils.GenderEnum.FEMININE)) 
+		      return true;
+
+		    return false;
+		}*/
+
+		NumberEnum num1 = (NumberEnum) chain.getProperty(Number.getInstance());
+		
+		/*    if (num1.equals(NumberEnum.PLURAL) && num2.equals(NumberEnum.SINGLE)) return true;
+		    if (num2.equals(NumberEnum.PLURAL) && num1.equals(NumberEnum.SINGLE)) return true;*/
+
+		AnimacyEnum an1 = (AnimacyEnum) chain.getProperty(Animacy.getInstance());
+
+		/*    if (an1.equals(AnimacyEnum.ANIMATE) && an2.equals(AnimacyEnum.UNANIMATE)) return true;
+		    if (an2.equals(AnimacyEnum.ANIMATE) && an1.equals(AnimacyEnum.UNANIMATE)) return true;*/
+		
+		System.out.println("Chain Gender = "+gen1.toString());
+		System.out.println("Chain Number = "+num1.toString());
+		System.out.println("Chain Animarcy = "+an1.toString());
+	// ==========================================================
+		
+		AnnotationSet goldCes = doc.getAnnotationSet(Constants.GS_NP);
+	    for (Annotation ce : chain.getCes()) {
+	    	mentionToStr(ce, doc, ces);
+/*
+	    	//System.out.println(ce.toString());
+	    	Integer menID = Integer.parseInt(ce.getAttribute(Constants.CE_ID));
+	    	Object matchObj = ce.getProperty(Property.MATCHED_CE);
+		    Integer match = (Integer) matchObj;
+		    if (match != -1) {
+		    	Annotation matchCe = goldCes.getAnnotationByNO(match);
+		    	Integer gclust = Integer.parseInt(matchCe.getAttribute(Constants.CLUSTER_ID));
+		    	// menID
+		    	System.out.print(menID);
+		    	
+		    	// gold cluster
+		    	System.out.print("<"+gclust+">  ");
+			
+		    	// span words
+		    	String spanWord[] = doc.getWords(ce);
+		    	for (int i = 0; i < spanWord.length; i++) {
+		    		System.out.print(spanWord[i]+" ");
+		    	} 
+		    	
+		    	// mention type
+		    	//FeatureUtils.PRTypeEnum mtype = (FeatureUtils.PRTypeEnum) Pronoun.getInstance().getValueProp(ce, doc);
+		    	boolean isProNoun = FeatureUtils.isPronoun(ce, doc);
+		    	
+		    	System.out.print(" {ProperName = "+isProNoun+"}");
+		    	
+		    	System.out.println();
+		    }
+*/
+	    }
+	}
+	
+	public void clearStatistics()
+	{
+		// clear statistic for prunning
+		globleQID = 0;
+		totalPrunningStep = 0;
+		goodPrunningStep = 0;
+	}
+	
+	public void testPrepare(String[] options)
+	{
+	    SystemConfig cfg = Utils.getConfig();
+		
+	    //
+	    parseOptions(options);
+	    
+	    // trajectory log
+	    String logPath = Utils.getWorkDirectory()+"/"+"policyCurveLog.txt";
+	    String cfgLogPath = cfg.getString("POLICY_CURVELOG_PATH", logPath);
+	    logPath = cfgLogPath;
+	    
+	    String featureLogPath = cfg.getFeatureLogPath();
+	    try {
+	      FileOutputStream featos = new FileOutputStream(featureLogPath);
+	      featureVecPrinter = new PrintWriter(new OutputStreamWriter(featos),true);
+	    } catch(FileNotFoundException ex) {
+	      throw new RuntimeException("Can not find the feature log:"+featureLogPath +"!");
+	    }
+	    
+	    // UMass Ranker
+		useUmassRanker = false;
+		useUmassRanker = cfg.getBoolean("USE_UMASS_RANKER", false);
+		if (strOptions.useRanklib != -1) {
+			useUmassRanker = false;
+			if (strOptions.useRanklib > 0) useUmassRanker = true;
+		}
+		if (useUmassRanker) {
+			String rlpath =  cfg.getString("UMASS_RANKER_MODEL_PATH", "/scratch/coref/xxx/rlmodel.txt");
+			if (strOptions.modelFileName != null) {
+				rlpath = strOptions.modelFileName;  // use arg model path
+			}
+			UmassRankers.loadModelFile(rlpath);
+		}
+		
+	    // for pruner
+		//pruningFactor = cfg.getInteger("PRUNNER_BEAM_SIZE", 4);
+		//prunUseRanklib = cfg.getBoolean("PRUNNER_USE_RANKLIB", false);
+		//if (prunUseRanklib) {
+		//	String prunModelPath = cfg.getString("PRUNNER_RANKLIB_MODEL_PATH", "prun_model_ace04.txt");
+		//	prunRanker.loadModelFile(prunModelPath);
+		//}
+		
+	    // for prunner
+		pruningFactor = cfg.getInteger("PRUNNER_BEAM_SIZE", 4);
+		if (strOptions.prunBeamSize > 0) {
+			pruningFactor = strOptions.prunBeamSize;
+		}
+		prunUseRanklib = cfg.getBoolean("PRUNNER_USE_RANKLIB", false);
+		if (strOptions.prunModelPath != null) {
+			prunUseRanklib = true;
+		}
+		// prun ranker name
+		String prunRankerName = cfg.getString("PRUNNER_RANKER", "svmrank");
+		if (strOptions.prunRankerName != null) {
+			prunRankerName = strOptions.prunRankerName;
+		}
+		//if (prunUseRanklib) {
+		if (prunRankerName.equals("lambdamart")) {
+			prunUseRanklib = true;
+			String prunModelPath = cfg.getString("PRUNNER_RANKLIB_MODEL_PATH", "prun_model_ace04.txt");
+			if (strOptions.prunModelPath != null) prunModelPath = strOptions.prunModelPath;
+			System.out.println("prun model path " + prunModelPath);
+			prunRanker.loadModelFile(prunModelPath);
+			
+		} else if (prunRankerName.equals("svmrank")) {
+			prunUseRanklib = false;
+			
+			//String prunWeightPath =  cfg.getString("PRUNNER_NOM_WEIGHT_PATH", Utils.getWorkDirectory()+"/"+"policy_ace04.w");
+			//if (strOptions.prunModelPath != null) prunWeightPath = strOptions.prunModelPath;
+			//weightNom = loadSearchWeights(prunWeightPath);
+			//weightPrn = loadSearchWeights(prunWeightPath);
+		}
+		
+		prunerAssemble = cfg.getBoolean("PRUNNER_ASSEMBLE", false);
+		if (prunerAssemble) {
+			// loading assemble pruner
+			for (int jj = 0; jj < 8; jj++) {
+				assemPruners[jj] = new UMassRankLib();
+			}
+			
+			///
+			//int[] assbb = {2, 3, 4, 5, 6, 8, 10, 20 };
+			int[] assbb = {1, 2, 3, 4, 5 };
+			for (int jj = 0; jj < 5; jj++) {
+				int bb2 = assbb[jj];
+				String assemPathItem = "PRUNNER_ASSEMBLE_MODEL_B" + String.valueOf(bb2);
+				String assemPath = cfg.getString(assemPathItem, "???");
+				System.out.println("Loading item: " + assemPathItem + " = " + assemPath);
+				assemPruners[jj].loadModelFile(assemPath);
+			}
+		}
+		
+		
+		// Scorer
+		String scorerName = Utils.getConfig().getOptimizeScorer();
+		if (scorerName == null || scorerName.length() <= 0) {
+			throw new RuntimeException("Score for which to cross-validate not specified");
+		}
+		scorer = Constructor.createScorer(scorerName);
+		zerooneScorer = Constructor.createScorer("ZeroOnePairScore");
+		mucScorer     = Constructor.createScorer("MUCScore");
+		bcubeScorer   = Constructor.createScorer("BCubedScore");
+		bcubConllScorer = Constructor.createScorer("BCubedConllv7");
+		
+		// make the mention extraction and mention match before running the policy
+		
+		// init hash constants for search node class
+		//SearchNode.initHashKey();
+		
+		// clear the variables for statistics
+		clearStatistics();
+		
+		readyToTesting = true;
+	}
+	
+	public void resolve(Document doc, AnnotationSet ces, double[] wNominal, double[] wPronoun,
+			 			double[] wNom2, double[] wPrn2, 
+			            boolean train, double iterNum, boolean ifGoldMen)
+	{
+		//collectCandidateDiscrepancy = true; // tmp
+		runPolicy(doc, ces, wNominal, wPronoun,  wNom2, wPrn2, false);
+		//runPolicyDummy(doc, ces);
+	}
+
+	private Double[] orderActionScores(Set<Double> scoreSet)
+	{
+		//Double[] scoreArr = scoreSet.toArray(new Double[1]);
+		List<Double> scoreList = new ArrayList<Double>();
+		for (Double s : scoreSet) {
+			scoreList.add(s);
+		}
+		// sort
+		Collections.sort(scoreList, new ScoreComparator());
+		// cast to array and return
+		return scoreList.toArray(new Double[1]);
+	}
+	
+	/**
+	 * Because LDS will call the policy for many times, 
+	 * some work that only need to do once for each doc should not included in "runPolicy"
+	 * Otherwise these work would be done at each time shen the policy is called for this
+	 * document, which will seriously slow down the performance.
+	 * */
+	public void prepareForOneDoc(Document doc, AnnotationSet ces)
+	{
+		AnnotationSet goldCes = doc.getAnnotationSet(Constants.GS_NP);
+		AnnotationSet nps = doc.getAnnotationSet(Constants.NP);
+		
+		// do matching
+		if (Utils.getConfig().getDataset().equals("muc6")) {
+			System.out.println("Matching MUC6 NPs ...");
+			Matcher.matchAnnotationSets(goldCes, nps, MatchStyleEnum.MUC, doc);
+		} else if (Utils.getConfig().getDataset().equals("ace04")) {
+			System.out.println("Matching ACE04 NPs ...");
+			Matcher.matchAnnotationSets(goldCes, nps, MatchStyleEnum.ACE, doc);
+		}
+	}
+	
+	public void runPolicy(Document doc, AnnotationSet ces, double[] wPronominal, double[] wPronoun,// boolean training)
+						  double[] wPronom2, double[] wPron2, boolean training)
+	{
+		// some constants
+		//recordFeatureNames(wPronom2);
+		SystemConfig cfg = Utils.getConfig();
+		boolean output = false;//true;//iterNum<0;
+		filterQID++;
+
+		
+		//useUmassRanker = false;
+		//useUmassRanker = cfg.getBoolean("USE_UMASS_RANKER", false);
+		boolean useJanaConstraint = cfg.getBoolean("USE_JANA_PRUNER_CONSTRAINT", false);
+		int prunerIter = 0;
+		if (strOptions.prunIter >= 0) {
+			prunerIter = strOptions.prunIter;
+		}
+		
+		// if it is not a dagger iteration, set it as 0, else set it as the actual iteration no.
+		int applyDagger = cfg.getInteger("APPLY_DAGGER_ITER", 0);
+		double daggerBeta = cfg.getDouble("DAGGER_BETA", 1.0);
+		if (strOptions.daggerIteration >= 0) {
+			applyDagger = strOptions.daggerIteration;
+		}
+		if (strOptions.daggerBeta >= 0) {
+			daggerBeta = strOptions.daggerBeta;
+		}
+		System.out.println("Dagger Beta = " + daggerBeta);
+		
+		
+		// prunner learner
+		boolean prunnerLearning = false;
+		prunnerLearning = cfg.getBoolean("LEARNING_PRUNNER", false);
+		if (strOptions.prunLearning >= 0) {
+			prunnerLearning = (strOptions.prunLearning > 0);
+		}
+		
+		System.out.println("Pruner learning = " + prunnerLearning);
+		System.out.println("Prunner Beam Size = " + pruningFactor);
+		
+		/*
+		if (percetron_pruner_online) {
+			useUmassRanker = false;
+			wPronominal = prunerWeight;
+		}
+		*/
+		
+		boolean checkConfidenceFilter = false;
+		//Random randomGenerator = new Random();
+		int ACT_MERGE = 1;
+		int ACT_NOP = 0; 
+		int MUST_LINK = 1, NO_LINK = 0;
+
+		HashMap<Integer,CorefChain> chains = new HashMap<Integer, CorefChain>();
+		AnnotationSet goldCes = doc.getAnnotationSet(Constants.GS_NP);
+		AnnotationSet nps = doc.getAnnotationSet(Constants.NP);
+		//System.out.println("GoldSetName = " + goldCes.getName());
+		//System.out.println("  NPSetName = " + ces.getName());
+		//System.out.println("GoldSetSize = " + goldCes.size());
+		//System.out.println("  NPSetSize = " + nps.size());
+		
+		
+		ActionList sortedActions = new ActionList();
+
+		// print features and weights
+		//printFeatures(wPos);
+
+		// some settings
+		// Should we apply the ground truth to test the loss value?
+		boolean ifGroundTruth = cfg.ORACLE_POLICY_TEST;
+		//System.out.println("Whether using all true actions? "+ifGroundTruth);
+
+		// Did we use gold mentions?
+		//System.out.println("Wether using gold mentions? "+ifGoldMention); // print if_use_gold_men
+
+		
+		// decision score summation
+		double decisionScoreSum = 0; // only avaialble on testing
+
+		//////////////////////////////////////////////////////////////////////
+		if (false) {
+			//doc.getVisiableCorefResult();
+
+			System.out.println("================================================================");
+
+			for (Annotation ce : ces.getOrderedAnnots()) {
+				System.out.print(ce.getAttribute(Constants.CE_ID));
+				System.out.print("<"+ce.getAttribute(Constants.CLUSTER_ID)+"> ");
+
+				String spanWord[] = doc.getWords(ce);
+				for (int i = 0; i < spanWord.length; i++) {
+					System.out.print(spanWord[i]+" ");
+				} 
+
+				// mention type
+				int startOffset = ce.getStartOffset();
+				int endOffset = ce.getEndOffset();
+				boolean isProNoun = FeatureUtils.isPronoun(ce, doc);
+
+				System.out.print("{");
+				System.out.print(" Offset= ("+startOffset+","+endOffset+")");
+				System.out.print(" isPronoun = "+isProNoun);
+				System.out.print("}");
+				System.out.println();
+			}
+		}
+		//////////////////////////////////////////////////////////////////////////
+		
+		// initial state
+		for(Annotation ce: ces.getOrderedAnnots()){
+			Integer curId = Integer.parseInt(ce.getAttribute(Constants.CE_ID));
+			Integer clustId = curId + 1000; // in order to distinguish with mention ID, cluster Id start from 1001
+			ce.setAttribute(Constants.CLUSTER_ID, String.valueOf(clustId)); // singleton cluster
+
+			CorefChain clust = new CorefChain(clustId, ce, doc);
+			clust.setProcessed(false);
+			chains.put(clustId, clust);
+		}
+		// prepare for the rule resolvers
+	    RuleResolvers.ruleResolvePronouns(chains, doc);
+	    HashMap<Annotation, ArrayList<Annotation>> posessives = new HashMap<Annotation, ArrayList<Annotation>>();
+	    RuleResolvers.addAllPossesives(ces, doc, posessives);
+		
+		
+		// clear the candidate discrepancies (for LDS)
+		if (collectCandidateDiscrepancy) {
+			// 1) clear candidate discrepancies
+			CandidateDiscrepancy.clear();
+			// 2) clear the confidence of the policy decision
+			
+			//
+			policyhistoryLog.mergeHistory.clear();
+			policyhistoryLog.bestMerge.clear();
+			policyhistoryLog.nonbestMerges.clear();
+			
+			policyhistoryLog.policyActionConfidence.clear();
+			policyhistoryLog.predictActionScore.clear();
+		}
+		
+		// clear error indicator
+		if (pruning_classifier) {
+			policyMistakeIndicator.clear();
+			policyDecisionAsDiscrepancy.clear();
+		}
+		
+		//System.out.println("=========Greedy policy testing: "+doc.getDocumentId()+"=============");
+		Action bestAction = null;
+		Action bestPredictAction = null;
+		Action discreAction = null;
+		Action hashAction = null;
+		Action trueBestAction = null;
+		int depth = 0;
+		int n_actions = 0;
+		double lastBestScore = 0;
+		
+		String huerLoss = "BCubConllScore"; // for OntoNotes 5.0
+		//String huerLoss = "BCubedScore";
+		//String huerLoss = "MUCScore";
+		
+		// error statistics
+		int n_error = 0;
+		int n_decisions = 0;
+
+		// get the mention-discrepancy map
+		HashMap<Integer, HashSet<DiscrepancyItem>> memtionIDDiscreMap = 
+			constructMentionDiscrepancyMap(chains, doc, ces);
+		
+		// ========================
+		// Preparing Hash!
+		// 1) Need clear hash?
+		/*
+		if (!policyHashTb.isSameDoc(doc.getAbsolutePath(), doc.getDocumentId()) ) {
+			 // current doc is different from the previous one, we need update the doc info, and clear hash
+			policyHashTb.setDocInfo(doc.getAbsolutePath(), doc.getDocumentId());
+			policyHashTb.clearHash();
+		}
+		*/
+		// ========================
+		
+		
+		
+		// do nothing if there is 0 mentions,
+		//=============================================
+		if (nps.size() == 0) {
+			System.out.println("Document " + doc.getAbsolutePath() + " contains only " + nps.size() + " mentions, do nothing for it.");
+			return; // do nothing
+		}
+		//=============================================	
+		
+		
+		int old_acc = goodPrunningStep;
+		int old_total = totalPrunningStep;
+		
+		while(depth < ces.size()) {
+			depth++;
+			n_actions = 0;
+			int originalNAct = -1;
+			int afterDiscrepancy = -1;
+			//==============================
+			// Which mention are we processing?
+			CorefChain unprocessedChain = getOneUnprocessedSingleton(chains); // usually, it should be a singleton
+			if (unprocessedChain == null) {
+				break; // no unprocess mentions left just exit
+				//throw new RuntimeException("Error doc: " + doc.getAbsolutePath());
+			}
+			Integer processMID = Integer.parseInt(unprocessedChain.getFirstCe().getAttribute(Constants.CE_ID));
+			if (unprocessedChain.getCes().size() != 1) {
+				throw new RuntimeException("Error in unprocessed mention, size = "+unprocessedChain.getCes().size());
+			}
+			//System.out.println("Depth "+ depth +" Processing mention "+processMID+" chainID "+unprocessedChain.id);
+			//==============================
+
+			for (Annotation ce : ces.getOrderedAnnots()) {
+				//printMention(ce, doc);
+			}
+
+			boolean hasDiscreAction = false;
+			boolean hasHashAction = false;
+			if (!training && 
+				!collectCandidateDiscrepancy && 
+				!pruning_classifier) {
+
+				discreAction = null;
+				hashAction = null;
+
+				// is there any discrepancy action? (so that we do not need to generate all actions)
+				discreAction = getActionFromDiscrepancySet(chains, -1, doc, ces, memtionIDDiscreMap);
+				if (discreAction != null) {
+					//System.out.println("Get a discrepancy action!");
+					bestAction = discreAction;
+					hasDiscreAction = true;
+				}
+
+				/*
+				if (!hasDiscreAction) {
+					// probe policy hash
+					SearchNode currentPolicyState = new SearchNode(ces);
+					// probe
+					hashAction = policyHashTb.probe(processMID, currentPolicyState);
+					if (hashAction != null) {
+						System.out.println("Policy hash hit! hashsize = "+policyHashTb.size());
+						bestAction = hashAction;
+						hasHashAction = true;
+					}
+				}
+				*/
+				
+				if (hasDiscreAction || hasHashAction) {
+					// do this action, then continue (skip all below!)
+					performMerge(bestAction, chains, sortedActions, ces, doc);
+					// step score
+					//double[] stepSc = getScoreArray(ces, doc);
+					//System.out.println("Search to "+depth+" step. Step score = "+stepSc[0]+" "+stepSc[1]+" "+stepSc[2]);
+					if (!hasUnprocessedCluster(chains)) {
+						break;
+					}
+					continue;// ship all the codes below!!!!
+				}
+			}
+
+			//System.out.println("sdfasfasdfasdfasdf");
+			
+			// generate all actions
+			sortedActions = genAllActions(chains, -1, doc, ces, wPronominal, wPronoun, ifGroundTruth);
+			originalNAct = sortedActions.size();
+		
+			// throw away the actions which violate the discrepancies ========
+			sortedActions = discrepancyPrunning(chains, doc, ces, sortedActions, memtionIDDiscreMap);
+			afterDiscrepancy = sortedActions.size();
+			if (discreAction != null) {
+				if (afterDiscrepancy < 1) {
+					throw new RuntimeException("Error on the action after discrepancy pruning: listsize = "+afterDiscrepancy);
+				}
+			}
+			
+			// prun (remove some stupid actions)
+			sortedActions = policyPrunning(chains, doc, ces, sortedActions, wPronominal, wPronoun);
+			//sortedActions = policyPrunningAssemble(chains, doc, ces, sortedActions, wPronominal, wPronoun);
+			//System.out.println(depth+" OriginNAct = " + originalNAct + " AfterDisNAct = " + afterDiscrepancy);
+
+			// statistics
+			HashMap<Double, HashSet<Action>> actionScoresMap = new HashMap<Double, HashSet<Action>>();
+			actionScoresMap.clear();
+
+			Action[] allLegalActions = sortedActions.toArray(new Action[1]);
+			//System.out.println("Naction = "+allLegalActions.length);
+
+			// compute score for each action
+			// and pick the best one
+			int[] actionType = new int[allLegalActions.length];
+			double[] trueLoss = new double[allLegalActions.length];
+			double[][] scoreRecord = new double[allLegalActions.length][3];
+			double bestLoss = -Double.MAX_VALUE;
+			double bestScore = -Double.MAX_VALUE;
+			double bestPredictScore = -Double.MAX_VALUE; // for error check in training
+			double predictScore = -Double.MAX_VALUE;
+			double trueBestScore = -Double.MAX_VALUE;
+			boolean isActionInvolvePronoun = false;
+			bestAction = null;
+			PolicyRankingSample rankingSample = new PolicyRankingSample();
+
+			for (int k = 0; k < allLegalActions.length; k++) {
+				// is current action operating a pronoun
+				if (true) {//allLegalActions[k].actName == ACT_MERGE) {
+					//CorefChain involvedClust = chains.get(allLegalActions[k].second);
+					if (allLegalActions[k] == null) {
+						throw new RuntimeException("Error on list k = "+k);
+					}
+					
+					CorefChain singletonClust = chains.get(allLegalActions[k].first);
+
+					Annotation involvedMen = singletonClust.getFirstCe();
+					boolean isProNoun = FeatureUtils.isPronoun(involvedMen, doc);
+					if (isProNoun) {
+						isActionInvolvePronoun = true;
+					}
+				}
+
+				// prunning ===========
+				if (allLegalActions[k].prunned > 0) {
+					//continue;
+				}
+				// ====================
+
+				// do a move ++++++++
+				int oldClustId = doTry(chains, doc, ces, allLegalActions[k]);
+				// ++++++++++++++++++
+
+				double score = -Double.MAX_VALUE;
+				if (training) {
+					// true loss score
+					double[] trueScoreArr = getSpecificScoreArray(ces, doc, huerLoss);
+					trueLoss[k] = trueScoreArr[2];
+
+					// === our hueristic and cost score ===
+					//double[] featVec = genActionFeatVec(chains, doc, ces, allLegalActions[k]);
+					//copyVec(allFeatureVec[numChild - 1], featVec, featVec.length);
+					//featLength = featVec.length;
+					score = trueLoss[k];
+
+					allLegalActions[k].setWeight(score, null);
+					//System.out.println(allLegalActions[k].toString()+" "+score);
+
+					scoreRecord[k][0] = trueScoreArr[0];
+					scoreRecord[k][1] = trueScoreArr[1];
+					scoreRecord[k][2] = trueScoreArr[2];
+
+					actionType[k] = allLegalActions[k].getActName();
+
+					if (bestScore < score) {
+						bestScore = score;
+						bestAction = allLegalActions[k];
+					}
+					
+					// try to make a prediction using current weight (error statistic)
+					// ==========================================
+					// 2013-5-17
+					//double[] featVec = genActionFeatVec(chains, doc, ces, allLegalActions[k]);
+					// 2013-8-4
+					//double[] featVec = genActionFeatVec(chains, doc, ces, allLegalActions[k]);
+					// 2014-5-27
+					double[] featVec = genActionFeatVecLongerNOOP(chains, doc, ces, allLegalActions[k]);
+					
+					// linear model
+					if (isActionInvolvePronoun) {
+						predictScore = innerProduct(featVec, wPronom2); // pronoun
+					} else {
+						predictScore = innerProduct(featVec, wPronom2); // non-pronoun
+					}
+					// non linear model
+					//System.out.println("useUmassRankeruseUmassRankeruseUmassRankeruseUmassRanker=======>" + useUmassRanker);
+					if (useUmassRanker) {
+						//System.out.println("TrainTrainTrainTrainTrainTrainTrainTrain=======>UmassRankerUmassRankerUmassRankerUmassRanker!!!!!!");
+						predictScore = UmassRankers.getRankerScore(featVec);
+					}
+
+					if (bestPredictScore < predictScore) {
+						bestPredictScore = predictScore;
+						bestPredictAction = allLegalActions[k];
+					}
+					
+					// record the score for
+					allLegalActions[k].trueScore = score;
+					allLegalActions[k].predScore = predictScore;
+					// ==========================================
+					
+				} else {
+					// 2013-5-17
+					//double[] featVec = genActionFeatVec(chains, doc, ces, allLegalActions[k]);
+					// 2013-8-4
+					//double[] featVec = genActionFeatVec(chains, doc, ces, allLegalActions[k]);
+					// 2014-5-27
+					double[] featVec = genActionFeatVecLongerNOOP(chains, doc, ces, allLegalActions[k]);
+					
+					// copy it 
+					Double[] featCopy = new Double[featVec.length];
+					for (int i2 = 0; i2 < featVec.length; i2++) {
+						featCopy[i2] = featVec[i2];
+					}
+					
+					double[] trueScoreArr2 = getSpecificScoreArray(ces, doc, huerLoss);
+					double trueScore = trueScoreArr2[2];
+
+					if (isActionInvolvePronoun) {
+						// pronoun
+						score = innerProduct(featVec, wPronom2);
+						// use ranklib as scorer
+						if (useUmassRanker) {
+							score = UmassRankers.getRankerScore(featVec);
+						}
+					} else {
+						// non-pronoun
+						score = innerProduct(featVec, wPronom2);
+						// use ranklib as scorer
+						if (useUmassRanker) {
+							score = UmassRankers.getRankerScore(featVec);
+						}
+					}
+
+					if (bestScore < score) {
+						bestScore = score;
+						bestAction = allLegalActions[k];
+					}
+					
+					if (trueBestScore < trueScore) {
+						trueBestScore = trueScore;
+						trueBestAction = allLegalActions[k];
+					}
+					
+					// record the score for
+					allLegalActions[k].trueScore = trueScore;
+					allLegalActions[k].predScore = score;
+					
+					rankingSample.candidateAction.add(allLegalActions[k]);
+					rankingSample.actionFeatures.put(allLegalActions[k], featCopy);
+					rankingSample.actionPredScores.put(allLegalActions[k], score);
+					rankingSample.actionTrueScores.put(allLegalActions[k], trueScore);
+					if (allLegalActions[k].getActName() == ACT_MERGE) {
+						CorefChain linktoClust = chains.get(allLegalActions[k].second);
+						//Annotation firstCe = linktoClust.getFirstCe();
+						CorefChain historyChain = new CorefChain(linktoClust, doc);
+						// remember clusters
+						rankingSample.actionMergeInChain.put(allLegalActions[k], historyChain);
+					} else {
+						CorefChain emptyChain = new CorefChain(-9999); // empty chain
+						rankingSample.actionMergeInChain.put(allLegalActions[k], emptyChain);
+					}
+					
+				}
+				
+				// put score - action hash
+				if (actionScoresMap.containsKey(score)) {
+					HashSet<Action> actionWithThisScore = actionScoresMap.get(score);
+					actionWithThisScore.add(allLegalActions[k]);
+				} else {
+					HashSet<Action> actionWithThisScore = new HashSet<Action>();
+					actionWithThisScore.add(allLegalActions[k]);
+					actionScoresMap.put(score, actionWithThisScore);
+				}
+
+				// undo a move ++++++++
+				undoTry(chains, doc, ces, allLegalActions[k], oldClustId);
+				// ++++++++++++++++++++
+			}
+				
+			// show something ---------------------
+			Double[] scoreArr = orderActionScores(actionScoresMap.keySet());
+			if (collectCandidateDiscrepancy) {
+				/*
+				for (int i = 0; i < scoreArr.length; i++) {
+					HashSet<Action> actionWithThisScore = actionScoresMap.get(scoreArr[i]);
+					System.out.print("Score "+scoreArr[i]+" rank("+(i+1)+"): ");
+					for (Action anyact : actionWithThisScore) {
+						printAction(chains, doc, ces, anyact);
+					}
+				}
+				System.out.println("==================================================");
+				*/
+			}
+
+			// choose the actoin to perform
+			// Are you performing dagger?
+			Action doAct = bestAction;
+			boolean outputTrainingInstance = true;
+			/*
+			if (applyDagger > 0) {
+				doAct = bestPredictAction;
+				outputTrainingInstance = true;Good_percentage 0.0/1.0 = 0.0
+
+				if (bestPredictAction.isSameAction(bestAction)) {
+					outputTrainingInstance = false;
+				}
+			} else {
+				doAct = bestAction;
+				outputTrainingInstance = true;
+			}*/
+			if (applyDagger > 0) {
+/*
+				// what actions should we do?
+				double rndProb = Math.random();
+				if (rndProb <= daggerBeta) { // take the predict truth
+					doAct = bestPredictAction;//bestAction; 2013-11-24
+				} else { // take the groud truth
+					doAct = bestAction;
+				}
+
+				// shoule we output this features
+				outputTrainingInstance = true;
+				if (bestPredictAction.isSameAction(bestAction)) {
+					outputTrainingInstance = false;
+				} // 2013-11-22
+				
+*/
+			} else {
+				if (training) {
+					doAct = bestAction;
+				} else {
+					//doAct = bestAction;
+					doAct = trueBestAction;
+				}
+				outputTrainingInstance = true;
+			}
+
+			if (!training) {
+				// sum the scores 
+				decisionScoreSum += bestScore;
+			}
+			
+			
+
+			// property of best action
+			//printAction(chains, doc, ces, bestAction);
+			// ------------------------------------
+
+			if (training) {
+				globleQID++;
+				/*
+				if (outputTrainingInstance) {
+					for (int i = 0; i < scoreArr.length; i++) {
+						int rank = 0;
+						//int rank = scoreArr.length - i;
+						if (i == 0) {
+							rank = 2;
+						} else {
+							rank = 1;
+						}
+
+						HashSet<Action> actionWithThisScore = actionScoresMap.get(scoreArr[i]);
+						for (Action candidateAct : actionWithThisScore) {
+							double[] featVec = genActionFeatVec(chains, doc, ces, candidateAct);
+							if (isActionInvolvePronoun) {
+								// this mention is a pronoun, we process it seperatly
+								printForSVMRank(featProVecPrinter, rank, globleQID, featVec, featVec.length);
+								printForSVMRank(featureVecPrinter, rank, globleQID, featVec, featVec.length);
+							} else {
+								// this mention is not a pronoun, we process it normally
+								printForSVMRank(featureVecPrinter, rank, globleQID, featVec, featVec.length);
+							}
+						}
+					}
+
+					// Prediction error check
+					// =======================
+					if (bestPredictAction.isSameAction(bestAction)) {
+						// predict correctly
+						n_decisions++;
+					} else {
+						// an error!!!
+						n_error++;
+						n_decisions++;
+						//System.out.println("OracleError ["+n_error+"/"+n_decisions+"] happens!");
+					}
+					// =======================
+				}
+				*/
+				
+				
+				// pruner learning
+				/*
+				if (prunnerLearning) {
+					int goodRank = 2;
+					int badRank = 1;
+					
+					// rank value as 2
+					HashSet<Action> tbestAction  = new HashSet<Action>();
+					HashSet<Action> goodAction  = new HashSet<Action>();
+					// rank value as 1
+					HashSet<Action> badAction = new HashSet<Action>();
+					
+					// 1) A* action
+					HashSet<Action> actionWithThisScore = actionScoresMap.get(scoreArr[0]);
+					for (Action candidateAct : actionWithThisScore) {
+						//goodAction.add(candidateAct);
+						tbestAction.add(candidateAct);
+					}	
+					//   what's the left actions?
+					ArrayList<Action> nonTrueBestActions = new ArrayList<Action>();
+					for (int i = 1; i < scoreArr.length; i++) {
+						for (Action candidateAct : actionScoresMap.get(scoreArr[i])) {
+							nonTrueBestActions.add(candidateAct);
+						}
+					}
+					
+					// order non-best actions by pruning model
+					// sort by predscore
+					Collections.sort(nonTrueBestActions, new ActionPredScoreComparator());
+					// 2) other actions in the beam
+					int leftBeamForNonbest = pruningFactor - 1; // removed the true best action
+					if (leftBeamForNonbest > nonTrueBestActions.size()) {
+						leftBeamForNonbest = nonTrueBestActions.size();
+					}
+					for (int i = 0; i < leftBeamForNonbest; i++) {
+						goodAction.add(nonTrueBestActions.get(i)); // comment out if use prasad's idea
+					}
+					
+					// 3 actions outside of the beam
+					for (int j = leftBeamForNonbest; j < nonTrueBestActions.size(); j++) {
+						badAction.add(nonTrueBestActions.get(j));
+					}
+					
+					// have a look ===============================================================
+					//for (Action act : tbestAction) {
+					//	System.out.println("BestPruningAction "+act.toString()+ " "+act.trueScore+" "+act.predScore);
+					//}
+					//for (Action act : goodAction) {
+					//	System.out.println("GoodPruningAction "+act.toString()+ " "+act.trueScore+" "+act.predScore);
+					//}
+					//for (Action act : badAction) {
+					//	System.out.println("badPruningAction "+act.toString()+ " "+act.trueScore+" "+act.predScore);
+					//}
+					//============================================================================
+					
+					/// generate feature files ======
+					for (Action act : tbestAction) {
+						double[] featVec = genActionFeatVec(chains, doc, ces, act);
+						printForSVMRank(prunerFeatPrinter, goodRank, globleQID, featVec, featVec.length);
+						//System.out.println("2 " + act.trueScore);
+					}
+					if (useJanaConstraint) {
+						for (Action act : goodAction) {
+							double[] featVec = genActionFeatVec(chains, doc, ces, act);
+							printForSVMRank(prunerFeatPrinter, goodRank, globleQID, featVec, featVec.length);
+							//System.out.println("1.9 " + act.trueScore);
+						}
+					}
+					for (Action act : badAction) {
+						double[] featVec = genActionFeatVec(chains, doc, ces, act);
+						printForSVMRank(prunerFeatPrinter, badRank, globleQID, featVec, featVec.length);
+						//System.out.println("1 " + act.trueScore);
+					}
+				}
+				*/
+				if (prunnerLearning) {
+					int goodRank = 1;
+					int badRank = 0;
+					
+					// first iteration
+					if (prunerIter == 0) {
+						// rank value as 2
+						HashSet<Action> tbestAction  = new HashSet<Action>();
+						HashSet<Action> goodAction  = new HashSet<Action>();
+						// rank value as 1
+						HashSet<Action> badAction = new HashSet<Action>();
+
+						// 1) A* action
+						HashSet<Action> actionWithThisScore = actionScoresMap.get(scoreArr[0]);
+						for (Action candidateAct : actionWithThisScore) {
+							tbestAction.add(candidateAct);
+						}	
+						// 2) all other actions?
+						ArrayList<Action> nonTrueBestActions = new ArrayList<Action>();
+						for (int i = 1; i < scoreArr.length; i++) {
+							for (Action candidateAct : actionScoresMap.get(scoreArr[i])) {
+								nonTrueBestActions.add(candidateAct);
+							}
+						}
+
+						/// generate feature files ======
+						for (Action act : tbestAction) {
+							//double[] featVec = genActionFeatVec(chains, doc, ces, act);
+							// 2014-5-27
+							double[] featVec = genActionFeatVecLongerNOOP(chains, doc, ces, act);
+							printForSVMRank(prunerFeatPrinter, goodRank, globleQID, featVec, featVec.length);
+							//System.out.println("2 " + act.trueScore);
+						}
+						for (Action act : nonTrueBestActions) {
+							//double[] featVec = genActionFeatVec(chains, doc, ces, act);
+							// 2014-5-27
+							double[] featVec = genActionFeatVecLongerNOOP(chains, doc, ces, act);
+							printForSVMRank(prunerFeatPrinter, badRank, globleQID, featVec, featVec.length);
+							//System.out.println("1 " + act.trueScore);
+						}
+
+					// later iterations
+					} else {
+						
+						Action truBestAct = getBestTrueAction(allLegalActions);
+						
+						// sort by predscore
+						ArrayList<Action> actionlst = actionArraytoList(allLegalActions);
+						Collections.sort(actionlst, new ActionPredScoreComparator());
+
+						// actual beam size
+						int beamLimitSize = pruningFactor; // removed the true best action
+						if (beamLimitSize > actionlst.size()) {
+							beamLimitSize = actionlst.size();
+						}
+						
+						// is true best action in the beam?
+						boolean isTrueActionInBeam = false;
+						int trueBestRank = -1;
+						for (int i = 0; i < actionlst.size(); i++) {
+							//System.out.println("pred = " + actionlst.get(i).predScore + " true = " + actionlst.get(i).trueScore);
+							if (actionlst.get(i).isSameAction(truBestAct)) {
+								trueBestRank = i;
+								if (trueBestRank <= beamLimitSize) {
+									isTrueActionInBeam = true;
+								}
+								break;
+							}
+						}
+						
+						// train again if the true best action is not in the beam
+						if (!isTrueActionInBeam) {
+							/// generate feature files ======
+							for (int i = 0; i < actionlst.size(); i++) {
+								//System.out.println("pred = " + actionlst.get(i).predScore + " true = " + actionlst.get(i).trueScore);
+								if (!actionlst.get(i).isSameAction(truBestAct)) {
+									//double[] featVec = genActionFeatVec(chains, doc, ces, actionlst.get(i));
+									// 2014-5-27
+									double[] featVec = genActionFeatVecLongerNOOP(chains, doc, ces, actionlst.get(i));
+									printForSVMRank(prunerFeatPrinter, badRank, globleQID, featVec, featVec.length);
+								} else {
+									//double[] featVec = genActionFeatVec(chains, doc, ces, actionlst.get(i));
+									// 2014-5-27
+									double[] featVec = genActionFeatVecLongerNOOP(chains, doc, ces, actionlst.get(i));
+									printForSVMRank(prunerFeatPrinter, goodRank, globleQID, featVec, featVec.length);
+									break;
+								}
+							}
+						}
+					
+						// have a look ===============================================================
+						//for (Action act : tbestAction) {
+						//	System.out.println("BestPruningAction "+act.toString()+ " "+act.trueScore+" "+act.predScore);
+						//}
+						//for (Action act : goodAction) {
+						//	System.out.println("GoodPruningAction "+act.toString()+ " "+act.trueScore+" "+act.predScore);
+						//}
+						//for (Action act : badAction) {
+						//	System.out.println("badPruningAction "+act.toString()+ " "+act.trueScore+" "+act.predScore);
+						//}
+						//============================================================================
+					}
+				}
+				/*
+				if (percetron_pruner_online) {
+
+					// rank value as 2
+					Action truBestAct = null;
+					//Action prdBestAct = null;
+					HashSet<Action> goodAction  = new HashSet<Action>();
+					// rank value as 1
+					HashSet<Action> badAction = new HashSet<Action>();
+
+					// 1) A* action
+					truBestAct = getBestTrueAction(allLegalActions);
+
+					//   what's the left actions?
+					//ArrayList<Action> nonTrueBestActions = new ArrayList<Action>();
+					//for (Action candidateAct : allLegalActions) {
+					//	if (!candidateAct.isSameAction(truBestAct)) {
+					//		nonTrueBestActions.add(candidateAct);
+					//	}
+					//}
+
+					// order non-best actions by pruning model
+					// sort by predscore
+					ArrayList<Action> actionlst = actionArraytoList(allLegalActions);
+					Collections.sort(actionlst, new ActionPredScoreComparator());
+
+					// 2) other actions in the beam
+					int beamLimitSize = pruningFactor;
+					if (beamLimitSize > actionlst.size()) {
+						beamLimitSize = actionlst.size();
+					}
+
+					// is true best action in the beam?
+					boolean isTrueActionInBeam = false;
+					int trueBestRank = -1;
+					for (int i = 0; i < actionlst.size(); i++) {
+						//System.out.println("pred = " + actionlst.get(i).predScore + " true = " + actionlst.get(i).trueScore);
+						if (actionlst.get(i).isSameAction(truBestAct)) {
+							trueBestRank = i;
+							if (trueBestRank <= beamLimitSize) {
+								isTrueActionInBeam = true;
+							}
+							//break;
+						}
+					}
+
+					System.out.println("Beam size = " + beamLimitSize + " trueBestRank = " + trueBestRank);
+
+					// =============================================================
+					if (!isTrueActionInBeam) {
+						System.out.println("pruner weight update " + nPrunerUpdate);
+						
+						///======= define good and bad actions ===============
+						// good actions
+						goodAction.add(truBestAct);
+						// bad actions
+						for (int i = 0; i < beamLimitSize; i++) {
+							badAction.add(actionlst.get(i));
+						}
+						// ==============================================
+						double[] goodGradient = new double[getFeatureDimension()];
+						double[] badGradient = new double[getFeatureDimension()];
+						vectorClearZero(goodGradient);
+						vectorClearZero(badGradient);
+						// good action features
+						double goodCnt = 0;
+						for (Action act : goodAction) {
+							double[] phi = genActionFeatVec(chains, doc, ces, act);
+							addArray(goodGradient, phi);
+							goodCnt++;
+						}
+						// bad action features
+						double badCnt = 0;
+						for (Action act : badAction) {
+							double[] phi = genActionFeatVec(chains, doc, ces, act);
+							addArray(badGradient, phi);
+							badCnt++;
+						}
+
+						System.out.println("good size = " + goodCnt);
+						System.out.println("bad size = " + badCnt);
+						
+						// make an average
+						divideArray(goodGradient, goodCnt);
+						divideArray(badGradient, badCnt);
+
+						// begin to update
+						double[] gradient = goodGradient;
+						subArray(gradient, badGradient);
+						multArray(gradient, pruner_learning_rate);
+						
+						addArray(prunerWeight, gradient);
+						
+						printArray(prunerWeight);
+
+						// sum the weight
+						addArray(gSumWeight, prunerWeight);
+						nPrunerUpdate++;
+					}
+				}
+				*/
+			}
+
+
+			
+			/*
+			Action doAct = null;
+			int rndRange = scoreArr.length;
+			if (rndRange > 2) rndRange = 2;
+			int rndIdx = randomGenerator.nextInt(rndRange);
+			Double tmps = scoreArr[rndIdx];
+			for (Action act : actionScoresMap.get(tmps)) {
+				doAct = act;
+				break;
+			}*/
+			
+			// check discrepancy action
+			/*
+			if (discreAction != null) {
+				if (discreAction.isSameAction(doAct)) {
+					// correct!
+				} else {
+					//System.out.print();
+					System.out.println("bestAction: "+doAct);
+					System.out.println("discreAction: "+discreAction);
+					throw new RuntimeException("Problem in discrepancy action!!!!");
+				}
+			}
+			
+			if (discreAction == null && hashAction != null) {
+				if (hashAction.isSameAction(doAct)) {
+					// correct!
+				} else {
+					System.out.println("bestAction: "+doAct);
+					System.out.println("hashAction: "+hashAction);
+					throw new RuntimeException("Problem in hash action!!!!");
+				}
+			}*/
+
+			
+			// =====================================================================
+			// record the best link and or other candidate links (with ordering)
+			if (collectCandidateDiscrepancy) {
+				//System.out.println("Collecting candidate discrepancies ...");
+				/*
+				// 1) clear
+				//CandidateDiscrepancy.clear();
+				ArrayList<DiscrepancyItem> orderedCandidateDis = new ArrayList<DiscrepancyItem>(); // orderedCandidateDis[0] is the current best link
+				
+				// 2) ranking all the mention-pair links 
+				//    (indicating cluster action ranking, and mention pair ranking inside this cluster action)
+				for (int i = 0; i < scoreArr.length; i++) {
+					HashSet<Action> actionWithThisScore = actionScoresMap.get(scoreArr[i]);
+					for (Action policyAct : actionWithThisScore) {
+						if (policyAct.getActName() == ACT_MERGE) {
+							// decompose this action into mention pair links ...
+							// current mention
+							CorefChain singletonCl = chains.get(policyAct.first);
+							Annotation operateMention = singletonCl.getFirstCe();
+							int operMenID = Integer.parseInt(operateMention.getAttribute(Constants.CE_ID));
+							// antecedent mention
+							CorefChain antecedentCl = chains.get(policyAct.second);
+							int pairOrderingIndex = 0;
+							for (Annotation antecedentMen : antecedentCl.getCes()) {
+								int anteMID = Integer.parseInt(antecedentMen.getAttribute(Constants.CE_ID)); // a possible antecedent
+								DiscrepancyItem possiblelink = new DiscrepancyItem(operMenID, anteMID, 1);
+								// set weight (cluster weight, mention pair inside cluster)
+								pairOrderingIndex++;
+								possiblelink.weightCl = scoreArr[i];
+								possiblelink.weightPair = pairOrderingIndex;//tempScoreForMentionPair();//scoreForMentionPair();
+								
+								// add it!
+								orderedCandidateDis.add(possiblelink);
+							}
+						} else if (policyAct.getActName() == ACT_NOP) {
+							// converte NO-OP action into a "No-Link"
+							CorefChain singletonCl = chains.get(policyAct.first);
+							Annotation operateMention = singletonCl.getFirstCe();
+							int operMenID = Integer.parseInt(operateMention.getAttribute(Constants.CE_ID));
+							int emptyAnte = -1; // do not link to any other antecedent
+							DiscrepancyItem nolink = new DiscrepancyItem(operMenID, emptyAnte, 1);
+							// set weight (cluster weight, mention pair inside cluster)
+							nolink.weightCl = scoreArr[i];
+							nolink.weightPair = 1;//tempScoreForMentionPair();//scoreForMentionPair();
+							
+							// add it!
+							orderedCandidateDis.add(nolink);
+						}
+					}
+				}
+				
+				// 3) order them 
+				// you can also do it here, or later
+				Collections.sort(orderedCandidateDis, new DiscrepancyWeightComparator());
+				//System.out.println("LDS Action gen ---------------------------------------------");
+				//for (DiscrepancyItem item : orderedCandidateDis) {
+				//	System.out.println(item.toString());
+				//}
+				//System.out.println("End of LDS Action gen --------------------------------------");
+				*/
+				
+				ArrayList<DiscrepancyItem> orderedCandidateDis = decomposeActionToCandidateDiscre(doc, ces, chains, actionScoresMap, 
+						                                                                          wPronominal, wPronoun);
+				
+				// 4) add them into hashmap
+				Integer curMID = 0;
+				for (DiscrepancyItem item : orderedCandidateDis) {
+					curMID = item.firstMenID;
+				}
+				if (!CandidateDiscrepancy.containsKey(curMID)) {
+					CandidateDiscrepancy.put(curMID, orderedCandidateDis);
+				} else {
+					throw new RuntimeException("CandidateDiscrepancy has contained the entry ("+curMID+", "+"orderedCandidateDis)");
+				}
+				
+				// 5) set the confidence
+				int nAct = allLegalActions.length;
+				double confidenceForCurrBest = 0;
+				if (nAct == 1) {
+					// 5.1) You have only one choice, so the confidence must be 100%!
+					confidenceForCurrBest = Double.MAX_VALUE - 2;
+				} else if (nAct > 1) {
+					// 5.2) You have more than one choices
+					//    confidence = firstBestScore - SecondBestScore
+					//    TODO what if ther is a tie in the best score????
+					double rank1Score = scoreArr[0];
+					int nBest = actionScoresMap.get(rank1Score).size();
+					// 5.2.1) if there is a tie in the best score will have no confidence that 
+					//      one is better than the other
+					if (nBest > 1) {
+						confidenceForCurrBest = 0;
+					} else if (nBest == 1) {
+						double rank2Score = scoreArr[1];
+						confidenceForCurrBest = (rank1Score - rank2Score);
+					}
+				} else if (nAct < 0) {
+					// something wrong!
+				}
+				
+				// store it in the hashmap
+				policyDecisionConfidence.put(processMID, confidenceForCurrBest);
+				//System.out.println("policyDecisionConfidence.put("+processMID+" "+confidenceForCurrBest);
+
+			}
+			//=====================================================================
+
+			// Remember current decision
+			if (collectCandidateDiscrepancy) {
+				CorefChain clustSingle = chains.get(doAct.first);
+				int operMID = doAct.operatedMenID;
+				// Annotation operMID
+				// Mergin in cluster
+				HashSet<Integer> mergeInClust = new HashSet<Integer>();
+				if (doAct.second > 0) {
+					CorefChain clustAnte = chains.get(doAct.second);
+					for (Annotation cmember : clustAnte.getCes()) {
+						int mid2 = Integer.parseInt(cmember.getAttribute(Constants.CE_ID));
+						mergeInClust.add(mid2);
+					}
+					
+					CorefChain bChain = new CorefChain(clustAnte, doc);
+					policyhistoryLog.bestMerge.put(operMID, bChain);
+				}
+				
+				// confidence
+				double con = policyDecisionConfidence.get(operMID);
+				
+				// remember them!
+				policyhistoryLog.bestActions.put(operMID, doAct);
+				policyhistoryLog.mergeHistory.put(operMID, mergeInClust);
+				policyhistoryLog.policyActionConfidence.put(operMID, con);
+				policyhistoryLog.predictActionScore.put(operMID, bestScore);
+				
+				ArrayList<CorefChain> allNonBestClust = new ArrayList<CorefChain>();
+				for (int k = 0; k < allLegalActions.length; k++) {
+					//if (!allLegalActions[k].isSameAction(doAct)) {
+						if (allLegalActions[k].getActName() == ACT_MERGE) {
+							CorefChain linktoClust = chains.get(allLegalActions[k].second);
+							Annotation firstCe = linktoClust.getFirstCe();
+							CorefChain historyChain = new CorefChain(linktoClust, doc);
+							
+							// remember clusters
+							allNonBestClust.add(historyChain);
+						} else {
+							CorefChain emptyChain = new CorefChain(-9999); // empty chain
+							allNonBestClust.add(emptyChain);
+						}
+					//}
+				}
+				policyhistoryLog.nonbestMerges.put(operMID, allNonBestClust);
+				
+				// feature names
+				policyhistoryLog.featNames = featNames;
+				policyhistoryLog.featWeights = featWeights;
+				
+				// all ranking actions
+				policyhistoryLog.candidateChoices.put(operMID, rankingSample);
+			}
+	
+			// ==========================================
+			// store the new best action into hashtable
+			/*
+			if (!training && policyHashTb.size() < 13728) {
+				// compute hashKeyjFN
+				SearchNode currentPolicyState = new SearchNode(ces);
+				// store it!
+				policyHashTb.store(processMID, currentPolicyState, bestAction);
+			}*/
+			// ==========================================
+
+			
+			// do action
+			//System.out.println("Performing "+bestAction);
+			performMerge(doAct, chains, sortedActions, ces, doc);
+			
+			// step score
+			//double[] stepSc = getScoreArray(ces, doc);
+			//System.out.println("Search to "+depth+" step. Step score = "+stepSc[0]+" "+stepSc[1]+" "+stepSc[2]);
+
+			if (!hasUnprocessedCluster(chains)) {
+				//System.out.print("Policy finsh working!");
+				break;
+			}
+
+			lastBestScore = bestScore;
+		}
+		
+		
+		// Which mention need to be corrected? (Online error statistics)
+		// ===========
+		if (!training) {
+			double d1 = (double)n_decisions;
+			double n1 = (double)n_error;
+			double r1 = n1 / d1;
+			// e
+			policyDecisionMistake += n_error;
+			policyTTotalDecision += n_decisions;
+			System.out.println("Policy_mistakes_current_doc: "+n_error+"/"+n_decisions+" = "+r1);
+			System.out.println("Policy_mistakes_total: "+policyDecisionMistake+"/"+policyTTotalDecision);
+			//System.out.println("Total_errorrate "+rate);
+		}
+		// ============
+		
+		
+		
+		// Oracle error number statistics ===============
+		if (training) {
+			double num, ben, rate;
+			policyDecisionMistake += n_error;
+			policyTTotalDecision += n_decisions;
+			num = policyDecisionMistake;
+			ben = policyTTotalDecision;
+			if (ben != 0) {
+				rate = (num / ben);
+			} else {
+				rate = 0.0;
+			}
+			System.out.println("Policy_mistakes_current_doc: "+n_error+"/"+n_decisions);
+			System.out.println("Policy_mistakes_total: "+policyDecisionMistake+"/"+policyTTotalDecision);
+			System.out.println("Total_errorrate "+rate);
+		}
+		// =======================================
+
+		
+		// 2013-6-25 Is confidence filter works?
+		if (checkConfidenceFilter) {
+			int truePos = 0,  trueNeg = 0;
+			int falsePos = 0, falseNeg = 0;			
+			int total = 0;
+			
+			int Ts = (int)(ces.size() * 0.5);
+			if (ces.size() < 10) {
+				Ts = ces.size();
+			}
+			
+			HashMap<Integer, Integer> confidenceIndicator = getIndicatorArr(policyDecisionConfidence, Ts);
+			
+			for (Integer menid : policyMistakeIndicator.keySet()) {
+				if (confidenceIndicator.containsKey(menid)) {
+					int trueLabel = policyMistakeIndicator.get(menid);
+					int predLabel = confidenceIndicator.get(menid);
+					// correct!
+					total++;
+					if (trueLabel == 0 && predLabel == 0) {
+						trueNeg++;
+					} else if (trueLabel == 1 && predLabel == 1) {
+						truePos++;
+					// wrong!
+					} else if (trueLabel == 0 && predLabel == 1) {
+						falsePos++;
+					} else if (trueLabel == 1 && predLabel == 0) {
+						falseNeg++;
+					}
+				} else {
+					throw new RuntimeException("confidenceIndicator does not contain mention ID "+menid+"!");
+				}
+			}
+			
+			filterTruePos += truePos;
+			filterTrueNeg += trueNeg;
+			filterFalsePos += falsePos;
+			filterFalseNeg += falseNeg;
+
+			// output 
+			System.out.println("MistakeCheck truepos:"+truePos+" trueneg: "+trueNeg+" falsepos: "+falsePos+" falseneg: "+falseNeg+"  total "+total);
+			System.out.println("MistakeCheckTotle truepos:"+filterTruePos+" trueneg: "+filterTrueNeg+" falsepos: "+filterFalsePos+" falseneg: "+filterFalseNeg);
+		
+			
+			// ============ Measure filter ranking quality ================ //
+			ArrayList<Integer> incorrectMens = new ArrayList<Integer>();
+			ArrayList<Integer> correctMens = new ArrayList<Integer>();
+			
+			for (Integer menid : policyMistakeIndicator.keySet()) {
+				int trueLabel = policyMistakeIndicator.get(menid);
+				if (trueLabel == 1) {
+					incorrectMens.add(menid);
+				} else {
+					correctMens.add(menid);
+				}
+			}
+			
+			HashMap<Integer, Integer> confidenceRanking = getConfidenceRankingArr(policyDecisionConfidence);
+			
+			// check all constraint pairs
+			int corrPair = 0;
+			int allPair = 0;
+			for (Integer errmen : incorrectMens) {
+				for (Integer cormen : correctMens) {
+					int con1 = confidenceRanking.get(errmen);
+					double con2 = confidenceRanking.get(cormen);
+					if (con1 < con2) {
+						corrPair++;
+					}
+					allPair++;
+				}
+			}
+			correctFilterRankingPairs += corrPair;
+			allFilterRankingPairs += allPair;
+			System.out.println("FilterRankingCheck corrPair: "+corrPair+" allPair: "+allPair);
+			System.out.println("FilterRankingCheckTotal corrPair: "+correctFilterRankingPairs+" allPair: "+allFilterRankingPairs);
+		}
+		
+		
+		/** return resulting clusters to file **/
+		if(output) {
+			File out = doc.getClusterFile();
+			PrintWriter outWriter;
+			try {
+				outWriter = new PrintWriter(out);
+			} catch (FileNotFoundException e) {
+				throw new RuntimeException(e);
+			}
+			//System.out.println("Writing annotations to "+out.getAbsolutePath());
+			new AnnotationWriterBytespan().write(ces, outWriter);
+		}
+
+		// ============
+		scoreSummation = decisionScoreSum;
+		//double[] sc = getScoreArray(chains, ces, doc);
+		double[] sc = getScoreArray(ces, doc);
+		//System.out.println("Performed "+depth+" joins. Score = "+sc[0]+" "+sc[1]+" "+sc[2]+". Total of "+ces.size()+" ces.");
+		//System.out.println("Finished scoring!");
+	}
+	
+	public String getPruningPerformance()
+	{
+		double d = totalPrunningStep;
+		double e = goodPrunningStep;
+		double ratio = 0;
+		if (d > 0) {
+			ratio = (e/d);
+		}
+		String result = goodPrunningStep + "/" +  totalPrunningStep + " " + ratio;
+		return result;
+	}
+	
+	private ArrayList<DiscrepancyItem> decomposeActionToCandidateDiscre(Document doc, AnnotationSet ces, 
+			                                                            HashMap<Integer,CorefChain> chains,
+			                                                            HashMap<Double, HashSet<Action>> actionScoresMap,
+			                                                            double[] wNominal, double[] wPronoun)
+	{
+		//System.out.println("Gen candidate discrepancy set! ...");
+		// some constants
+		int ACT_MERGE = 1;
+		int ACT_NOP = 0;
+		
+		// get the ordered candidate actions at this step
+		Double[] scoreArr = orderActionScores(actionScoresMap.keySet());
+		
+		// 1) clear
+		//CandidateDiscrepancy.clear();
+		ArrayList<DiscrepancyItem> orderedCandidateDis = new ArrayList<DiscrepancyItem>(); // orderedCandidateDis[0] is the current best link
+		
+		// 2) ranking all the mention-pair links 
+		//    (indicating cluster action ranking, and mention pair ranking inside this cluster action)
+		for (int i = 0; i < scoreArr.length; i++) {
+			HashSet<Action> actionWithThisScore = actionScoresMap.get(scoreArr[i]);
+			for (Action policyAct : actionWithThisScore) {
+				if (policyAct.getActName() == ACT_MERGE) {
+					// decompose this action into mention pair links ...
+					// current mention
+					CorefChain singletonCl = chains.get(policyAct.first);
+					Annotation operateMention = singletonCl.getFirstCe();
+					int operMenID = Integer.parseInt(operateMention.getAttribute(Constants.CE_ID));
+					// antecedent mention
+					CorefChain antecedentCl = chains.get(policyAct.second);
+					int pairOrderingIndex = 0;
+					ArrayList<DiscrepancyItem> pairsInOneCluster = new ArrayList<DiscrepancyItem>(); // 
+					for (Annotation antecedentMen : antecedentCl.getCes()) {
+						int anteMID = Integer.parseInt(antecedentMen.getAttribute(Constants.CE_ID)); // a possible antecedent
+						DiscrepancyItem possiblelink = new DiscrepancyItem(operMenID, anteMID, 1);
+						// set weight (cluster weight, mention pair inside cluster)
+						pairOrderingIndex++;
+						possiblelink.weightCl = scoreArr[i];
+						possiblelink.weightPair = scoreForMentionPair(chains, doc, ces, operateMention, antecedentMen, 
+								                                      wNominal, wPronoun); 
+						// add it into the list that contained all pairs in the same policy action!
+						pairsInOneCluster.add(possiblelink);
+					}
+					// sort pairs in the same action (find which pair is the "Best-Link"!)
+					convertPairScoreToRank(pairsInOneCluster);
+					
+					// add them 
+					orderedCandidateDis.addAll(pairsInOneCluster);
+					
+				} else if (policyAct.getActName() == ACT_NOP) {
+					// converte NO-OP action into a "No-Link"
+					CorefChain singletonCl = chains.get(policyAct.first);
+					Annotation operateMention = singletonCl.getFirstCe();
+					int operMenID = Integer.parseInt(operateMention.getAttribute(Constants.CE_ID));
+					int emptyAnte = -1; // do not link to any other antecedent
+					DiscrepancyItem nolink = new DiscrepancyItem(operMenID, emptyAnte, 1);
+					// set weight (cluster weight, mention pair inside cluster)
+					nolink.weightCl = scoreArr[i];
+					nolink.weightPair = 1;//because there is only one corresponding discrepancy for NOP action
+					
+					// add it!
+					orderedCandidateDis.add(nolink);
+				}
+			}
+		}
+		
+		// 3) order them 
+		// you can also do it here, or later
+		Collections.sort(orderedCandidateDis, new DiscrepancyWeightComparator());
+		//System.out.println("LDS Action gen ---------------------------------------------");
+		//for (DiscrepancyItem item : orderedCandidateDis) {
+		//	System.out.println(item.toString());
+		//}
+		//System.out.println("End of LDS Action gen --------------------------------------");
+		
+		/*
+		// 4) add them into hashmap
+		Integer curMID = 0;
+		for (DiscrepancyItem item : orderedCandidateDis) {
+			curMID = item.firstMenID;
+		}
+		if (!CandidateDiscrepancy.containsKey(curMID)) {
+			CandidateDiscrepancy.put(curMID, orderedCandidateDis);
+		} else {
+			throw new RuntimeException("CandidateDiscrepancy has contained the entry ("+curMID+", "+"orderedCandidateDis)");
+		}*/
+		return orderedCandidateDis;
+	}
+	
+	// score for mention pair
+	public double scoreForMentionPair(HashMap<Integer,CorefChain> chainState, Document doc, AnnotationSet ces,
+									  Annotation currentMen, Annotation antecedentMen, double[] wNominal, double[] wPronoun)
+	{
+		double score = 0;
+		Annotation firstMen = antecedentMen;
+		Annotation secondMen = currentMen;
+		
+		// way1, use the natural order of mentions pair score
+		boolean useFirstbest = getPairComparatorName();
+		if (useFirstbest) {
+			score = -antecedentMen.getStartOffset();
+			return score;
+		}
+		
+		// way2 a little complicate ...
+		
+		// is the antecedent really the antecedent?
+		if (antecedentMen.compareSpan(currentMen) > 0) {
+			// should not be like this, is it?!
+			//throw new RuntimeException("Why antecedent mention does not appear before current mention???");
+			firstMen = currentMen;
+			secondMen = antecedentMen;
+		}
+		
+		// we usually do not consider the pairs whose first mention is a pronoun
+		boolean firstPronoun = FeatureUtils.isPronoun(firstMen, doc);
+		boolean secondPronoun = FeatureUtils.isPronoun(secondMen, doc);
+		if (firstPronoun) {
+			// we do not recommend such mention pairs to be considered firstly
+			score = -Double.MAX_VALUE + 1; // min score
+			return score;
+		}
+		
+		// mention pair ...
+		double tmparr[] = getLocalFeatureVector(firstMen, secondMen, doc);
+		
+		// cluster ... (it might not make sense to use cluster feature here, we just want it to be consistent)
+		int firstId = 1, secondId = 2;
+		CorefChain curSingleCl = new CorefChain(firstId, firstMen, doc);
+		CorefChain anteSingleCl = new CorefChain(secondId, secondMen, doc);
+		double tmparr2[] = getFeatureVector(curSingleCl, anteSingleCl, doc, true);
+		
+		// total vector
+		double[] featvec = new double[tmparr.length + tmparr2.length + 1];
+		for (int j = 0; j < tmparr.length; j++) { 
+			featvec[j] = tmparr[j];
+		}
+		for (int k = 0; k < tmparr2.length; k++) {
+			int k2 = k + tmparr.length;
+			featvec[k2] = tmparr2[k];
+		}
+		// threhold (useless here, just make the innerproduct work correctly)
+		featvec[tmparr.length + tmparr2.length  + 1 - 1] = 0; // this is not a no-op
+		
+		if (!secondPronoun) {
+			score = innerProduct(featvec, wNominal);
+		} else {
+			score = innerProduct(featvec, wPronoun);
+		}
+		
+		return score;
+	}
+	
+	private double tempScoreForMentionPair()
+	{
+		double start = 0;
+		double end = 10;
+		double random = new Random().nextDouble();
+		double result = start + (random * (end - start));
+		return result;
+	}
+	
+	private void convertPairScoreToRank(ArrayList<DiscrepancyItem> pairsInOneCluster)
+	{
+		// scoring
+		Collections.sort(pairsInOneCluster, new DiscrepancyPairComparator());
+		// change
+		//System.out.println("================================================");
+		double index = 0;
+		for (DiscrepancyItem item : pairsInOneCluster) {
+			index++;
+			item.weightPair = index; // change score to its rank
+			//System.out.println(item.toString());
+		}
+		//System.out.println("================================================");
+	}
+	
+	public Action policy(HashMap<Integer,CorefChain> chainState, int ceId, Document doc, AnnotationSet ces, double[] wPos, double[] wNeg, boolean returnGroundTruth)
+	{
+		Action bestAction = new Action();
+		Action a = new Action();
+		Action targetAct = new Action();
+		//System.out.println("Policy, given a state, return a best action!");  
+		boolean output = false;
+		ActionList sortedActions = new ActionList();
+		/*
+	 //Load the weight vector and split it into local feature weights, cluster feature weights and a 
+	 //terminating weight
+	 int numLocalFeatures = getBinarizer().getNumBinaryFeatures();
+	 if(wPos.length!=numLocalFeatures+getClusterFeatures().size()+1)
+	   throw new RuntimeException("Weight vector is not the right length "+wPos.length + " vs. " +(numLocalFeatures+getClusterFeatures().size()+1));
+	 double terminateWeight = wPos[wPos.length-1];
+	 double[] localWeights = Arrays.copyOf(wPos, numLocalFeatures);
+	 double[] clW = Arrays.copyOfRange(wPos, numLocalFeatures, wPos.length-1);
+
+
+	 System.out.println("=========Policy is working on: "+doc.getDocumentId()+" at step "+ceId+"=============");
+
+	 int n_actions = 0;
+	 int ACT_MERGE = 1, ACT_NOP = 0; 
+
+	 // gen all action
+	 // action generation -------------------------------------------------------
+	 RuleResolvers.ruleResolvePronouns(chainState, doc);
+	 HashMap<Annotation, ArrayList<Annotation>> posessives = new HashMap<Annotation, ArrayList<Annotation>>();
+	 RuleResolvers.addAllPossesives(doc.getAnnotationSet(Constants.NP), doc, posessives);
+
+	 if (chainState.size() <= 0) {
+		throw new RuntimeException("State should contain at least one cluster!");
+	 }
+
+	 // find the first unprocessed chain
+	 CorefChain[] chainArray = chainState.values().toArray(new CorefChain[1]);
+	 CorefChain chain1 = chainArray[0], chain2;
+	 boolean has_nonprocecssed = false;
+	 for (int i=0; i < chainState.size(); i++) {
+	    chain1 = chainArray[i];
+	    if (chain1.getProcessed() == false) {
+	      has_nonprocecssed = true;
+	      break;
+	    }
+	 }
+
+	 if (has_nonprocecssed == false) {
+	   //throw new RuntimeException("No non-processed cluster anymore!");
+		Action nullact = new Action();
+		//nullact.setActName(-1);
+		return nullact; // no action can be done now ...
+	 }
+
+	 // try to merge it into a processed chain
+	 for (int j=0; j < chainState.size(); j++) {
+	   chain2 = chainArray[j];
+	   CorefChain c1,c2;
+
+	   if (chain2.getProcessed() == false) { // we need chain2.processed == true
+		 continue;
+	   }
+
+	   c1=chain1;
+	   c2=chain2;
+
+	   // merge action
+	   if(includePair(c1.getFirstCe(), c2.getFirstCe(), doc, posessives)) {
+	     n_actions++;
+	     System.out.println("ActionId: "+n_actions+", Cluster pair: "+c1.id+","+c2.id);
+	     //double value = Classifier.plattScale(res[i],PerceptronM.SCALE_A,PerceptronM.SCALE_B);
+	     double[] localVector = getLocalFeatureVector(c1.getCes().get(0), c2.getCes().get(0), doc);
+	     double localWeight = statePot(localWeights, localVector);
+	     Action curAction = new Action(c1.getId(),c2.getId(),localWeight, localVector);
+	     double[] featVec = getFeatureVector(c1, c2, doc,true);
+		 curAction.setWeight(localWeight*statePot(clW, featVec),featVec);
+		 c1.addAction(c2.id,curAction);
+		 c2.addAction(c1.id, curAction);
+		 c1.setSimilarity(c2, curAction);
+		 curAction.updateWeight(wPos,wPos);
+		 curAction.setActName(ACT_MERGE);
+		 sortedActions.add(curAction);
+	  }
+	}
+
+	// NOP action
+	double[] termLocal = new double[numLocalFeatures];
+	Action terminate = new Action(-1,-1,0,termLocal);
+	double[] termCl = new double[getClusterFeatures().size()];
+	terminate.first = chain1.getId();
+	terminate.setWeight(terminateWeight,termCl);
+	terminate.setActName(ACT_NOP);
+	sortedActions.add(terminate);
+		 */
+
+		// gen all actions
+		sortedActions = genAllActions(chainState, ceId, doc, ces, wPos, wNeg, returnGroundTruth);
+
+		// calculate scores
+		//sortedActions = setConfidences(sortedActions, chainState, wPos, wNeg);
+		System.out.println("Number of actions: "+sortedActions.size());
+		//System.out.println("Terminate "+terminate);
+		// pick best action
+		int n_actions = sortedActions.size();
+
+		if (n_actions > 0) {
+			for (Action act : sortedActions) {
+				/*
+		if (act.getActName() == 1) {
+			System.out.println("Regular Action Weight: "+act.getWeight());		  
+		} else {
+			System.out.println("NOP Action Weight: "+act.getWeight());
+		}*/
+				if (act.getIsTarget()) {
+					targetAct = act;
+				}
+			}
+		}
+
+		if (n_actions > 0) {
+			a = sortedActions.popBest(); // best action
+			//System.out.println("Num actions: "+sortedActions.size());
+
+			if (returnGroundTruth) {
+				if (a.isSameAction(targetAct) == false) {
+					policyDecisionMistake++;
+					//System.out.println("Policy makes the "+policyDecisionMistake+"th mistakes!");
+				} else {
+					//System.out.println("Policy returns the "+policyTTotalDecision+"th correct action!");
+					//System.out.println("Correctness rate "+policyTTotalDecision+"/"+(policyTTotalDecision+policyTTotalDecision));
+				}
+				policyTTotalDecision++;
+				a = targetAct;
+			}	
+
+			//System.out.println("Best action weight: "+a.getWeight());
+			//System.out.println("Best action: "+a.toString());
+		} else {
+			a = new Action();
+			a.setActName(-1);
+			//System.out.println("No best action anymore! "+a.getActName());
+		}
+
+		return a;
+	}
+
+	
+	
+	@Override
+	public void train(Iterable<Document> idocs, String modelOutputFilename, String[] options)
+	{
+		DEBUG = false; // debug
+		SystemConfig cfg = Utils.getConfig();
+
+		// Training docs ...
+		ArrayList<Document> docs = new ArrayList<Document>();
+		for (Document doc : idocs){
+			docs.add(doc);
+		}
+		
+		//////////////////////////////////////////////////////////////////
+		// use the argument from the string
+		parseOptions(options);
+		//////////////////////////////////////////////////////////////////
+
+		// gen features for training
+		FeatureVectorGenerator.makeFeatures(docs, true, null);
+		
+	    // trajectory log
+	    //String logPath = Utils.getWorkDirectory()+"/"+"curveLog.txt";
+	    String logPath = cfg.getCurveLogPath();
+	    try {
+	      FileOutputStream fos = new FileOutputStream(logPath);
+		  logPrinter = new PrintWriter(new OutputStreamWriter(fos),true);
+	    } catch(FileNotFoundException ex) {
+	      //throw new RuntimeException("Can not find the curve log:"+logPath +"!");
+	    }
+		
+	    // feature log -------------------------------------------
+	    //String featureLogPath = Utils.getWorkDirectory()+"/"+"featureLog.txt";
+	    String featureLogPath = cfg.getFeatureLogPath();
+	    if (strOptions.featFileName != null) {
+	    	featureLogPath = strOptions.featFileName; // 
+	    }
+	    try {
+	      FileOutputStream featos = new FileOutputStream(featureLogPath);
+	      featureVecPrinter = new PrintWriter(new OutputStreamWriter(featos),true);
+	    } catch(FileNotFoundException ex) {
+	      throw new RuntimeException("Can not find the feature log:"+featureLogPath +"!");
+	    }
+	    // featlog specific for pronoun
+	    String featPronounPath = cfg.getPronounFeatLogPath();
+	    try {
+	      FileOutputStream featos2 = new FileOutputStream(featPronounPath);
+	      featProVecPrinter = new PrintWriter(new OutputStreamWriter(featos2),true);
+	    } catch(FileNotFoundException ex) {
+	      //throw new RuntimeException("Can not find the feature log:"+featPronounPath +"!");
+	    }
+	    
+	    // for learning a prunner
+	    // ===========================================================
+	    String prunFeatPath = cfg.getString("PRUN_FEAT_PATH", "prunnerFeat.txt");
+	    if (strOptions.prunFeatFileName != null) {
+	    	prunFeatPath = strOptions.prunFeatFileName; // 
+	    }
+	    System.out.println("prun feature file path " + prunFeatPath);
+	    try {
+	      FileOutputStream featos = new FileOutputStream(prunFeatPath);
+	      prunerFeatPrinter = new PrintWriter(new OutputStreamWriter(featos),true);
+	    } catch(FileNotFoundException ex) {
+	      //throw new RuntimeException("Can not find the prunner learning:"+prunFeatPath+"!");
+	    }
+	    // feature log -------------------------------------------
+	    
+		// Scorer
+		String scorerName = Utils.getConfig().getOptimizeScorer();
+		if (scorerName == null || scorerName.length() <= 0) {
+			throw new RuntimeException("Score for which to cross-validate not specified");
+		}
+		scorer = Constructor.createScorer(scorerName);
+		zerooneScorer = Constructor.createScorer("ZeroOnePairScore");
+		mucScorer     = Constructor.createScorer("MUCScore");
+		bcubeScorer   = Constructor.createScorer("BCubedScore");
+		bcubConllScorer = Constructor.createScorer("BCubedConllv7");
+		
+		// Parameter settings ...
+		learnRate = cfg.LEARNING_RATE;
+		// Print configuration
+		System.out.println("Training iterations = " + NUM_TRAIN_ITERS);
+		System.out.println("Learning rate = " + learnRate);
+
+		// Initial Weight -----------------------------
+		//int weightDem = getLocalFeatures().size() + getClusterFeatures().size() + 1;
+		int weightDem = getBinarizer().getNumBinaryFeatures()+getClusterFeatures().size() + 1;
+		double[] wPos = new double[weightDem];
+		double[] aveWPos = new double[weightDem];
+		double[] sumWPos = new double[weightDem];
+		double[] wPronoun = new double[weightDem];
+		//double[] wNeg=new double[wPos.length*2]; // useless
+		//double[] aveWNeg=new double[wPos.length*2]; // useless
+		int i;
+		for(i=0;i<wPos.length-1;i++){
+			wPos[i]=0.0;
+		}
+		for(i=0;i<sumWPos.length-1;i++){
+			sumWPos[i]=0.0;
+		}
+		//wPos[wPos.length-1]=0.1;
+		wPos[wPos.length-1]=0.0;   
+		sumWPos[sumWPos.length-1]=0.0;
+		N_updates = 0;
+		// -------------------------------------------
+		
+		// ======================
+		// load weight if any
+		String corpusName = cfg.getDataset();
+		String WEIGHT_PATH1 = cfg.getString("POLICY_NOM_WEIGHT_PATH", Utils.getWorkDirectory()+"/"+"policy.w");
+		String WEIGHT_PATH2 = cfg.getString("POLICY_RON_WEIGHT_PATH", Utils.getWorkDirectory()+"/"+"policyPro.w"); // for pronoun
+		// second level~ (2013-8-4)
+		String W2_PATH1 = cfg.getString("POLICY_NOM_SECOND_WEIGHT_PATH", Utils.getWorkDirectory()+"/"+"plcy2.w");
+		String W2_PATH2 = cfg.getString("POLICY_RON_SECOND_WEIGHT_PATH", Utils.getWorkDirectory()+"/"+"plcyPro2.w"); // for pronoun
+		
+		// loading policy weight vector
+		if (corpusName.equals("ace04")) {
+			WEIGHT_PATH1 = cfg.getString("POLICY_NOM_WEIGHT_PATH", Utils.getWorkDirectory()+"/"+"policy_ace04.w");
+			WEIGHT_PATH2 = cfg.getString("POLICY_RON_WEIGHT_PATH", Utils.getWorkDirectory()+"/"+"policyPro_ace04.w"); // for pronoun
+			// new
+			W2_PATH1 = cfg.getString("POLICY_NOM_SECOND_WEIGHT_PATH", Utils.getWorkDirectory()+"/"+"plcy2_ace04.w");
+			W2_PATH2 = cfg.getString("POLICY_RON_SECOND_WEIGHT_PATH", Utils.getWorkDirectory()+"/"+"plcyPro2_ace04.w"); // for pronoun
+		} else if (corpusName.equals("muc6")) {
+			WEIGHT_PATH1 = cfg.getString("POLICY_NOM_WEIGHT_PATH", Utils.getWorkDirectory()+"/"+"policy_muc6.w");
+			WEIGHT_PATH2 = cfg.getString("POLICY_RON_WEIGHT_PATH", Utils.getWorkDirectory()+"/"+"policyPro_muc6.w"); // for pronoun
+			// new
+			W2_PATH1 = cfg.getString("POLICY_NOM_SECOND_WEIGHT_PATH", Utils.getWorkDirectory()+"/"+"plcy2_muc6.w");
+			W2_PATH2 = cfg.getString("POLICY_RON_SECOND_WEIGHT_PATH", Utils.getWorkDirectory()+"/"+"plcyPro2_muc6.w"); // for pronoun
+		
+		} else if (corpusName.contains("ontonotes")) {
+			
+		} else {
+			throw new RuntimeException("Unknown dataset type!");
+		}
+		
+		// ranklib
+/*
+		useUmassRanker = cfg.getBoolean("USE_UMASS_RANKER", false);
+		if (strOptions.useRanklib != -1) {
+			useUmassRanker = false;
+			if (strOptions.useRanklib > 0) useUmassRanker = true;
+		}
+		if (useUmassRanker) {			
+			if (corpusName.equals("ace04")) {
+				String rlpath =  cfg.getString("UMASS_RANKER_MODEL_PATH", "/scratch/coref/xxx/rlmodel.txt");
+				if (strOptions.modelFileName != null) {
+					rlpath = strOptions.modelFileName; // use arg model apth
+				}
+				UmassRankers.loadModelFile(rlpath);
+			} else if (corpusName.equals("muc6")) {
+				String rlpath =  cfg.getString("UMASS_RANKER_MODEL_PATH", "/scratch/coref/xxx/rlmodel.txt");
+				if (strOptions.modelFileName != null) {
+					rlpath = strOptions.modelFileName;  // use arg model path
+				}
+				UmassRankers.loadModelFile(rlpath);
+			} else if (corpusName.contains("ontonotes")) {
+				String rlpath =  cfg.getString("UMASS_RANKER_MODEL_PATH", "/scratch/coref/xxx/rlmodel.txt");
+				if (strOptions.modelFileName != null) {
+					rlpath = strOptions.modelFileName;  // use arg model path
+				}
+				UmassRankers.loadModelFile(rlpath);
+			} else {
+				throw new RuntimeException("Unknown dataset type!");
+			}
+		}
+*/
+		// linear weight?
+		double[] weightNom = loadSearchWeights(WEIGHT_PATH1);
+		double[] weightPrn = loadSearchWeights(WEIGHT_PATH2);
+		// new 
+		double[] w2Nom = loadSearchWeights(W2_PATH1);
+		double[] w2Prn = loadSearchWeights(W2_PATH2);
+		
+		// svmrank
+		if (strOptions.useSvmrank != -1) {
+			if (strOptions.useSvmrank > 0 && strOptions.modelFileName != null) {
+				w2Nom = loadSearchWeights(strOptions.modelFileName);
+				w2Prn = loadSearchWeights(strOptions.modelFileName);
+			}
+		}
+		// ======================
+		
+		/// prunning ranker
+	    // for prunner
+		pruningFactor = cfg.getInteger("PRUNNER_BEAM_SIZE", 4);
+		if (strOptions.prunBeamSize > 0) {
+			pruningFactor = strOptions.prunBeamSize;
+		}
+
+		prunUseRanklib = cfg.getBoolean("PRUNNER_USE_RANKLIB", false);
+		if (strOptions.prunModelPath != null) {
+			prunUseRanklib = true;
+		}
+		// prun ranker name
+		String prunRankerName = cfg.getString("PRUNNER_RANKER", "svmrank");
+		if (strOptions.prunRankerName != null) {
+			prunRankerName = strOptions.prunRankerName;
+		}
+		//if (prunUseRanklib) {
+		if (prunRankerName.equals("lambdamart")) {
+			prunUseRanklib = true;
+			String prunModelPath = cfg.getString("PRUNNER_RANKLIB_MODEL_PATH", "prun_model_ace04.txt");
+			if (strOptions.prunModelPath != null) prunModelPath = strOptions.prunModelPath;
+			System.out.println("prun model path " + prunModelPath);
+			prunRanker.loadModelFile(prunModelPath);
+			
+		} else if (prunRankerName.equals("svmrank")) {
+			prunUseRanklib = false;
+			
+			//String prunWeightPath =  cfg.getString("PRUNNER_NOM_WEIGHT_PATH", Utils.getWorkDirectory()+"/"+"policy_ace04.w");
+			//if (strOptions.prunModelPath != null) prunWeightPath = strOptions.prunModelPath;
+			//weightNom = loadSearchWeights(prunWeightPath);
+			//weightPrn = loadSearchWeights(prunWeightPath);
+		}
+
+		/*
+		percetron_pruner_online = cfg.getBoolean("PERCEPTRON_PRUN_ONLINE_LEARN", false);
+		System.out.println("percetron_pruner_online = "  + percetron_pruner_online);
+		if (percetron_pruner_online) {
+			prunerWeight = new double[getFeatureDimension()];
+			gSumWeight = new double[getFeatureDimension()];
+			gAvgWeight = new double[getFeatureDimension()];
+			vectorClearZero(prunerWeight);
+			vectorClearZero(gSumWeight);
+			vectorClearZero(gAvgWeight);
+			nPrunerUpdate = 0;
+		}*/
+
+		//System.out.println("Initial Score="+intialScore(docs));
+		boolean useGoldMenTrain = true; // config mentions
+
+		//for(int it = 0; it < NUM_TRAIN_ITERS; it++) {
+		for(int it = 0; it < 1; it++) {
+			int docNum = 0;
+			policyDecisionMistake = 0;
+			policyTTotalDecision = 0;
+			long itStartTime = System.currentTimeMillis();
+
+			// Go through all the training documents
+			//System.out.println("iter "+it+" learnRate="+learnRate);
+			System.out.println("Run pruner training on " + docs.size() + " documents.");
+			for(Document doc : docs){
+				long docStartTime = System.currentTimeMillis(); //---------------------
+				//---------------------------------------------------------------------
+				System.out.println("GoldSetNam="+doc.getAnnotationSet(Constants.GS_OUTPUT_FILE).getName());
+				System.out.println("GoldSet2Nam="+doc.getAnnotationSet(Constants.GS_NP).getName());
+				System.out.println("NPSetNam="+doc.getAnnotationSet(Constants.NP).getName());
+				System.out.println("PropSetNam="+doc.getAnnotationSet(Constants.PROPERTIES_FILE_NAME).getName()); 
+				System.out.println("Doc name: "+doc.getAbsolutePath());
+				System.out.println("Doc ID: "+doc.getDocumentId());
+				//---------------------------------------------------------------------
+				System.out.println("Working on DOCUMENT "+(docNum++));
+				// ======
+				AnnotationSet npces = doc.getAnnotationSet(Constants.NP);
+				//docTrain(doc, npces, wPos, sumWPos, useGoldMenTrain);
+				runPolicy(doc, npces, weightNom, weightPrn, w2Nom, w2Prn, true);
+				// ======
+				long opTime = System.currentTimeMillis() - docStartTime; // ----------
+				System.out.println("DONE TRAINING DOCUMENT " + (docNum-1) + " in " + formatTime(opTime));
+			}
+
+			// check learning performance after each iteration
+			System.out.println("Iteration= "+it+" Policy mistakes: "+policyDecisionMistake+"/"+policyTTotalDecision);
+			//reconcile.Scorer.score(true, docs, null);
+
+			//System.out.println("Iteration "+it+" TradScore="+df.format(scoreTrad(tdocs,aveWPos,wNeg,it))+ " done in " + formatTime(System.currentTimeMillis()-itStartTime));
+			//Scorer.score(true, idocs, record);
+			
+			// average!
+			//1 copy
+			/*
+			printFeatures(gSumWeight);
+			gAvgWeight = new double[gSumWeight.length];
+			copyVec(gAvgWeight, gSumWeight);
+			divideArray(gAvgWeight, nPrunerUpdate);
+			*/
+			
+			//2 do average
+			//for (int k = 0; k < sumWPos.length; k++) {
+			//	aveWPos[k] = (sumWPos[k] / N_updates);
+			//}
+			// show average feature
+			//printFeatures(aveWPos);
+			// average Pos Weight
+			
+			/*
+			System.out.println("pruner weight update number: " + nPrunerUpdate);
+			System.out.println(" ------------- Current Weight Vector -------------");
+			//printFeatures(wPos);
+			printFeatures(prunerWeight);
+			System.out.println(" ------------- Current Weight Vector -------------");
+			System.out.println(" ============= Average Weight Vector =============");
+			//printFeatures(aveWPos);
+			printFeatures(gAvgWeight);
+			System.out.println(" ============= Average Weight Vector =============");
+			*/
+			//System.out.println("Iteration "+it+" TradScore="+df.format(scoreTrad(tdocs,aveWPos,wNeg,it))+ " done in " + formatTime(System.currentTimeMillis()-itStartTime));
+			System.out.println("Finished Iteration "+it);
+			//reconcile.Scorer.score(true, idocs, null);
+
+			//}
+			
+			/*
+			PrintStream ofile; 
+			String weightFileName = Utils.getWorkDirectory()+"/"+"pruner_weight_" + corpusName + "_"+ ("beam" + pruningFactor) +"_iter"+it + ".w";
+			try{
+				ofile = new PrintStream(new FileOutputStream(weightFileName));
+			}catch(Exception e){
+				throw new RuntimeException(e);
+			}
+			for(int y = 0; y < wPos.length; y++) {
+				//ofile.println(aveWPos[y]);
+				ofile.println("="+gAvgWeight[y]);
+			}
+			ofile.close();
+			*/
+		}
+
+		//System.out.println("Initial Score="+intialScore(docs));
+		System.out.println("N_updates="+N_updates);   
+		//ystem.out.println("Current Score="+getScore(docs));
+
+		// File Output =============================================================
+		//PrintStream ofile,ofileNeg; 
+		/*
+		try{
+			ofile = new PrintStream(new FileOutputStream(Utils.getWorkDirectory()+"/"+Utils.getConfig().getClassifier()));
+			ofileNeg = new PrintStream(new FileOutputStream(Utils.getWorkDirectory()+"/"+Utils.getConfig().getClassifier()+".neg"));
+		}catch(Exception e){
+			throw new RuntimeException(e);
+		}
+		for(int y = 0; y < wPos.length; y++) {
+			ofile.println("="+aveWPos[y]);
+		}
+		*/
+		// Neg ---------------------
+		//System.out.println("Output neg features to "+Utils.getWorkDirectory()+"/"+Utils.getConfig().getClassifier()+".neg");
+		//for(int y = 0; y < wNeg.length; y++) {
+		//	ofileNeg.println("="+wNeg[y]);
+		//}
+		// -------------------------
+		//ofile.close();
+		//ofileNeg.close();
+		// =========================================================================
+		
+	    logPrinter.close();
+	    featureVecPrinter.close();
+	}
+
+	private void printForSVMRank(PrintWriter featVecPrinter, int rank, int qid, double[] featureVec, int vecLength)
+	{
+		// rank
+		//featVecPrinter.print("rank"+rank);
+		featVecPrinter.print(rank);
+		// qid
+		featVecPrinter.print(" qid:"+qid);	
+		// feature vector
+		for (int k = 0; k < vecLength; k++) {
+			if (featureVec[k] != 0) { // sparse model
+				featVecPrinter.print(" "+(k+1)+":"+featureVec[k]);
+			}
+		}
+		// end of line
+		featVecPrinter.println();
+	}
+/*
+	private void printForPegasos(int label, double[] featureVec, int vecLength)
+	{
+		// label
+		//featureVecPrinter.print("label"+label);	
+		featureVecPrinter.print(label);	
+		// feature vector
+		for (int i = 0; i < vecLength; i++) {
+			//if (featureVec[i] != 0) {
+				featureVecPrinter.print(" "+(i)+":"+featureVec[i]);
+			//}
+		}
+		// end of line
+		featureVecPrinter.println();
+	}
+*/
+
+	// By Chao Ma
+	//docTrain
+	public void docTrain(Document doc, AnnotationSet ces, double[] wPos, double[] sumWPos, boolean useGoldMen) {
+		System.out.println("Train this document!");  
+		boolean output = true;
+		SystemConfig cfg = Utils.getConfig(); // configuration
+
+		//Load the weight vector and split it into local feature weights, cluster feature weights and a 
+		//terminating weight
+		int numLocalFeatures = getBinarizer().getNumBinaryFeatures();
+		if(wPos.length!=numLocalFeatures+getClusterFeatures().size()+1) {
+			throw new RuntimeException("Weight vector is not the right length "+wPos.length + " vs. " +(numLocalFeatures+getClusterFeatures().size()+1));
+		}
+		double terminateWeight = wPos[wPos.length-1];
+		double[] localWeights = Arrays.copyOf(wPos, numLocalFeatures);
+		double[] clW = Arrays.copyOfRange(wPos, numLocalFeatures, wPos.length-1);
+		HashMap<Integer,CorefChain> chains = new HashMap<Integer, CorefChain>();
+		AnnotationSet goldCes = doc.getAnnotationSet(Constants.GS_NP);
+		ActionList sortedActions = new ActionList();
+
+		System.out.println("AnnSetNam="+ces.getName());
+		System.out.println("GoldSetNam="+goldCes.getName());
+		System.out.println("NPSetNam="+doc.getAnnotationSet(Constants.NP).getName());
+
+		/*
+    for(Annotation ce: ces.getOrderedAnnots()){
+      Integer curId = ce.getId();
+      if (useGoldMen) {
+        System.out.println("Curt Gold Cluster ID = "+ce.getAttribute(Constants.CLUSTER_ID));
+        //Annotation gold_ce = goldCes.get(curId);
+        //System.out.println("True Gold Cluster ID = "+gold_ce.getAttribute(Constants.CLUSTER_ID));
+        ce.setAttribute(Constants.CLUSTER_ID, String.valueOf(curId));
+        //System.out.println("Set  Gold Cluster ID = "+ce.getAttribute(Constants.CLUSTER_ID)); 
+
+        CorefChain curChain = new CorefChain(curId, ce, doc);
+        chains.put(curId,curChain);
+      } else {
+        Object matchObj = ce.getProperty(Property.MATCHED_CE);
+        Integer matchId = (Integer) matchObj;
+        if (matchId != -1) {
+          Annotation goldMatchCe = goldCes.get(matchId); // matched ces
+          CorefChain cur = new CorefChain(curId, ce, doc);
+          String goldCID = goldMatchCe.getFeatures().get(Constants.CLUSTER_ID);
+          System.out.println("Gold Cluster ID = "+goldCID);
+    	  cur.setProcessed(false);
+          chains.put(curId,cur);
+          //System.out.println("Ce="+ce);
+        }
+      }
+    }
+		 */
+
+		// some settings
+		/*
+    // Did we use gold mentions?
+    String goldConSetName = cfg.getAnnotationSetName(Constants.GS_NP);
+    String predConSetName = cfg.getAnnotationSetName(Constants.NP);
+    System.out.println("Work mention set name = "+predConSetName);
+    System.out.println("Gold mention set name = "+goldConSetName);
+    boolean ifGoldMention = false;
+    if (predConSetName.equals(goldConSetName)) {
+       ifGoldMention = true;
+    }
+    System.out.println("Whether using gold mentions? "+ifGoldMention); // print if_use_gold_men
+
+    // init state
+    if (ifGoldMention) {
+    	AnnotationSet tmp_ces2 = doc.getAnnotationSet(Constants.GS_NP);
+    	ces = (AnnotationSet)tmp_ces2.clone();
+    	ces.setName("Copy2");
+	    System.out.println("GoldSetName = " + goldCes.getName());
+	    System.out.println("NPSetName = " + ces.getName());
+    }
+		 */
+		// Matching gold mentions and predict mentions
+		System.out.println("Matching NPs ...");
+		Matcher.matchAnnotationSets(goldCes, ces, MatchStyleEnum.ACE, doc);
+
+		for(Annotation ce: ces.getOrderedAnnots()) {
+			Integer curId = Integer.parseInt(ce.getAttribute(Constants.CE_ID));
+			ce.setAttribute(Constants.CLUSTER_ID, String.valueOf(curId+1000)); // singleton cluster
+			// show gold cluster
+			/*
+        Object matchObj = ce.getProperty(Property.MATCHED_CE);
+	    Integer matchId = (Integer) matchObj;
+	    Annotation gmatch2 = goldCes.getAnnotationByNO(matchId);
+	    String corefid = gmatch2.getFeatures().get(Constants.CLUSTER_ID);
+        System.out.println("Gold cluster Id = "+corefid);
+			 */
+			Object matchObj2 = ce.getProperty(Property.MATCHED_CE);
+			Integer matchId2 = (Integer) matchObj2;
+			if (matchId2 != -1) {
+				CorefChain cur = new CorefChain(curId, ce, doc);
+				cur.setProcessed(false);
+				chains.put(curId,cur);
+			}
+		}
+
+		Action a = null, bestAction = null, ourBestAct = null;
+		ActionList AllActions = new ActionList();
+		boolean hasLegalAction = false;
+		int depth = 0;
+		int n_actions = 0;
+
+		while(depth < ces.size()) {
+			depth++;
+			n_actions = 0;
+
+			// gen all actions
+			sortedActions = genAllActions(chains, depth, doc, ces, wPos, wPos, true);
+			n_actions = sortedActions.size(); // number of legal moves
+			if (sortedActions.size() == 0) {
+				System.out.println("Reach the max depth!");
+				break;
+			}
+
+			// find true best action
+			ActionList actionsCopy = sortedActions;
+			for (Action act : sortedActions) {
+				if (act.getIsTarget()) {
+					bestAction = act;
+					break;
+				}
+			}
+			// get our best action
+			ourBestAct = sortedActions.popBest();
+
+			System.out.println("True Best Action: "+bestAction);
+			System.out.println("Our  Best Action: "+ourBestAct);
+
+			// weight updating ...
+			if (!ourBestAct.isSameAction(bestAction)) {
+				// policy mistake, we need to update
+				System.out.println("Updating weight vector!!!!!!!!");
+				for (Action ac : sortedActions) {
+					if (!ac.isSameAction(bestAction)) { // this is a non-target node
+						double[] nontargetPhi =         ac.getFeatureVector();
+						double[] targetPhi =    bestAction.getFeatureVector();   	 
+						for (int j = 0; j < targetPhi.length; j++) {
+							double delta = (targetPhi[j] - nontargetPhi[j]) * learnRate;
+							wPos[j] = wPos[j] + delta;
+							sumWPos[j] = sumWPos[j] + wPos[j]; // accumulate
+							N_updates++;
+							//System.out.print(wPos[j]+" ");
+						}//System.out.println();
+					}
+				}
+				//policyDecisionMistake++;
+				//policyTTotalDecision++;
+				//System.out.println("Policy mistakes: "+policyDecisionMistake+"/"+policyTTotalDecision);
+			} else {
+				// Great! the policy has found a correct best action
+				//policyTTotalDecision++;
+			}
+
+			// do action
+			//System.out.println("Performing "+bestAction);
+			performMerge(bestAction,chains,sortedActions,ces,doc);
+		}
+
+		// Show annotation
+		//------------------  
+		/*
+        System.out.println();
+	    int menid = 0, cid = 0;
+	    CorefChain[] chainarr = chains.values().toArray(new CorefChain[1]);
+	    for (int i = 0; i < chains.size(); i++) {
+	      CorefChain tchain = chainarr[i];
+	      menid = 0;
+	      if (tchain.getCes() != null && tchain.getCes().size() > 0) {
+	    	cid++;
+	        System.out.println("ClustId: "+cid);
+	        for(Annotation ce: tchain.getCes()){
+	    	  menid++;
+	          System.out.println(menid+": "+ce.toString());
+	        }
+	      }
+	    }
+		 */
+		//------------------
+
+		//AnnotationSet gnpces = doc.getAnnotationSet(Constants.GS_OUTPUT_FILE);
+		/*
+	AnnotationSet tmpces = (AnnotationSet)gnpces.clone();
+	tmpces.setName("CopyGoldAnnSet");
+
+	System.out.println("SetName="+tmpces.getName());
+	for(Annotation ce2: tmpces){
+	  Integer cId = ce2.getId();
+	  ce2.setAttribute(Constants.CLUSTER_ID, String.valueOf(cId));
+	  System.out.println(cId+"="+ce2.getAttribute(Constants.CLUSTER_ID));
+	}
+		 */
+
+		//double[] sc = getScoreArray(chains, ces, doc);
+		double[] sc = getScoreArray(ces, doc);
+		//System.out.println("Performed "+depth+" joins. Score = "+df.format(sc)+". Total of "+ces.size()+" ces.");
+		System.out.println("Score size = "+sc.length);
+		System.out.println("Performed "+depth+" joins. Score = "+sc[0]+" "+sc[1]+" "+sc[2]+". Total of "+ces.size()+" ces.");
+		System.out.println("Finished scoring!");    
+	}
+
+	public double getScore(Map<Integer,CorefChain> chains, AnnotationSet ces, Document doc){
+		for(Integer in:chains.keySet()){
+			CorefChain c = chains.get(in);
+			if(!c.isRedirect())
+				for(Annotation an:c.getCes()){
+					an.setAttribute(Constants.CLUSTER_ID, in.toString());
+					if(RESOLVE_DEBUG){
+						for(Entry<Property, Object> prop:c.getProperties().entrySet()){
+							an.setAttribute(prop.getKey().toString(), prop.getValue()==null?"nil":prop.getValue().toString());
+						}
+					}
+				}
+		}
+		return getScore(ces,doc);
+	}
+	public double[] getScoreArray(Map<Integer,CorefChain> chains, AnnotationSet ces, Document doc){
+		for(Integer in:chains.keySet()){
+			CorefChain c = chains.get(in);
+			if(!c.isRedirect())
+				for(Annotation an:c.getCes()){
+					an.setAttribute(Constants.CLUSTER_ID, in.toString());
+				}
+		}
+		return getScoreArray(ces,doc);
+	}
+	public double getScore(List<DocumentPair> dps ,Map<Integer,CorefChain> chains, AnnotationSet ces, Document doc){
+		for(Integer in:chains.keySet()){
+			CorefChain c = chains.get(in);
+			if(!c.isRedirect())
+				for(Annotation an:c.getCes()){
+					an.setAttribute(Constants.CLUSTER_ID, in.toString());
+				}
+		}
+		doc.addAnnotationSet(ces, Constants.CLUSTER_FILE_NAME, false);
+		ArrayList<Document> docL = new ArrayList<Document>();
+		docL.add(doc);
+		InternalScorer inScorer = (InternalScorer)scorer;
+		double[] score = inScorer.score(false, new DocArray2DocIterable(docL), dps, Constants.CLUSTER_FILE_NAME);
+		//System.out.println(Arrays.toString(w));
+		return 100*score[Scorer.F];
+	}
+	public double getScore(AnnotationSet ces, Document doc){
+		doc.addAnnotationSet(ces, Constants.CLUSTER_FILE_NAME, false);
+		ArrayList<Document> docL = new ArrayList<Document>();
+		docL.add(doc);
+		double[] score = scorer.score(false, new DocArray2DocIterable(docL));
+		//System.out.println(Arrays.toString(w));
+		return 100*score[Scorer.F];
+	}
+	public double[] getScoreArray(AnnotationSet ces, Document doc){
+		doc.addAnnotationSet(ces, Constants.CLUSTER_FILE_NAME, false);
+		ArrayList<Document> docL = new ArrayList<Document>();
+		docL.add(doc);
+		double[] score = scorer.score(false, new DocArray2DocIterable(docL));
+		//System.out.println(Arrays.toString(w));
+		return score;
+	}
+	public double[] getSpecificScoreArray(AnnotationSet ces, Document doc, String scorerName){
+		doc.addAnnotationSet(ces, Constants.CLUSTER_FILE_NAME, false);
+		ArrayList<Document> docL = new ArrayList<Document>();
+		docL.add(doc);
+		double[] score = null;
+		if (scorerName.equals("MUCScore")) {
+			score = mucScorer.score(false, new DocArray2DocIterable(docL));
+		} else if (scorerName.equals("BCubedScore")) {
+			score = bcubeScorer.score(false, new DocArray2DocIterable(docL));
+		} else if (scorerName.equals("ZeroOnePairScore")) {
+			score = zerooneScorer.score(false, new DocArray2DocIterable(docL));
+			//score = new double[3];
+		} else if (scorerName.equals("BCubConllScore")) {
+			score = bcubConllScorer.score(false, new DocArray2DocIterable(docL));
+		} else {
+			throw new RuntimeException("Unknown scorer name!!!");
+		}
+		return score;
+	}
+	
+	public void performMerge(Action act,HashMap<Integer,CorefChain> chains, ActionList sortedActions, AnnotationSet ces, Document doc){//, double[] wPos, double[] wNeg){
+		boolean DEBUG = false;
+
+		if (act.getActName() == 1) { // if this is a Merge action
+			// c1: to be processed
+			// want to merge c1 into c2
+			//System.out.println("c1="+act.first+" c2="+act.second);
+			CorefChain c1=chains.get(act.first);
+			CorefChain c2=chains.get(act.second);
+			if (c1 == null || c2 == null) {
+				System.out.println("One of the cluster is null!");
+			}
+			if((c2.getProcessed() == true) &&
+					(c1.getProcessed() == false)){
+				// Ok, do nothing
+			} else if(c2.getProcessed() == false && c1.getProcessed() == true){
+				CorefChain temp = c1;
+				c1=c2;
+				c2=temp; 
+			} else {
+				// error!
+				throw new RuntimeException("Both clusters were porcessed or were non-processed while performing "+act);
+			}
+			CorefChain newC = c2.join(c1);
+			//chains.put(act.first, new CorefChain(newC.getId())); 
+			// chains.put(act.second,new CorefChain(newC.getId()));
+			chains.remove(act.first);
+			chains.remove(act.second);
+			newC.setProcessed(true);
+			chains.put(newC.getId(), newC);
+
+			if(DEBUG)
+				System.out.println("New: "+newC.toString(doc));
+		} else if (act.getActName() == 0) {
+			// just do nothing
+			CorefChain newC = chains.get(act.first);
+			newC.setProcessed(true);
+			chains.remove(act.first);
+			chains.put(newC.getId(), newC);
+		}
+
+		if (act.getActName() >= 0) {
+			//RuleResolvers.ruleResolvePronouns(chains, doc);//
+			//RuleResolvers.cleanUpPronounChains(chains, doc);
+		}
+
+		// show something
+		if(DEBUG)
+			System.out.println("Performing "+act);
+		if(DEBUG){
+			System.out.println("--------------------------------------------------");
+			for(CorefChain c:chains.values())
+				System.out.println(c.toString(doc));
+			System.out.println("--------------------------------------------------");
+		}
+		//int i=0;
+		if(DEBUG){
+			//for(Action a:sortedActions){
+			//  if(i++<10) System.out.println(a.toString());
+			//}
+			System.out.println(act);
+			//System.out.println("Joining: \n"+(c1==null?"null":c1.toString(doc))+"\nand:\n"+(c2==null?"null":c2.toString(doc))+" (w="+(act==null?"null":act.getWeight())+")");
+			//printFeatures(act.getFeatureVector());
+		}
+
+
+
+		//    for(Action a:sortedActions){
+		//      if(a.first==act.first||a.second==act.second||a.first==act.second||a.second==act.first)
+		//        System.out.println("new: "+a);
+		//    }
+	}
+	public static double statePot(double[] w, double[] f){
+		//System.out.println(Arrays.toString(w)+"*"+Arrays.toString(f));
+		return /*innerProduct(w, f);*/Math.exp(innerProduct(w, f));
+	}
+
+	public static double innerProduct(double[] v1, double[] v2)
+	{
+		//if(v1.length!=v2.length) {
+		//	throw new RuntimeException("Inner product of vector of unequal lenghts "+v1.length+" vs. "+v2.length);
+		//}
+		
+		int len = v1.length;
+		if (v1.length > v2.length) {
+			len = v2.length; // pick the min
+		}
+		
+		double result= 0.0;
+		for(int i=0; i<len; i++)
+			result += v1[i]*v2[i];
+		return result;
+	}
+/*
+	public Action nextAction(ActionList actionList, double epsilon, AnnotationSet ces, HashMap<Integer,CorefChain> chains, Document doc, double score){
+		boolean optimalP = rand.nextDouble()>=epsilon;
+		Action next = null;
+		if(optimalP){
+			next = actionList.getMaxPositive();
+		}else{
+			next = actionList.peek();
+		}
+		Action terminate = actionList.getTerminate();
+		return next;
+		//    return next==null?(rand.nextDouble()<.3||PERCEPTRON_MAX||MAX_MARGIN?terminate:actionList.peek()):next;
+	}
+*/
+	public Action sample(ActionList actionList, double epsilon){
+		return probSample(actionList, epsilon);
+	}
+	public Action probSample(ActionList actionList, double epsilon){
+		double Z = actionList.getZ();//, altZ=0;
+		//    double[] featSum = new double[actionList.first().getFeatureVector().length];
+		//    for(Action a:actionList){
+		//      addMultArray(featSum, a.getFeatureVector(),a.getWeight()/Z);
+		//      altZ+=a.getWeight();
+		//      //System.out.println("f[0]="+a.getFeatureVector()[0]+"*"+a.getWeight());
+		//    }
+		//    for(int i=0; i< featSum.length;i++)
+		//      if(Math.abs((featSum[i]-actionList.getFeatVectorSum()[i])/featSum[i])>0.01)
+		//        throw new RuntimeException("featSum["+i+"]="+featSum[i]+" vs="+actionList.getFeatVectorSum()[i]);
+		//    if(Math.abs((Z-altZ)/Z)>0.01)
+		//      throw new RuntimeException("Z="+Z+" altZ="+altZ);
+		double draw = rand.nextDouble()*Z;
+		Iterator<Action> actIter = actionList.iterator();
+		Action result=actIter.next();
+		double total = result.getWeight();
+		int i=1;
+		for(; actIter.hasNext()&&total<draw; result=actIter.next()){
+			total += result.getWeight();
+			i++;
+		}
+		System.out.println("Draw "+i+"/"+actionList.size() +"(p="+result.getWeight()/Z+")");
+		return result;
+	}
+
+	
+	public static void subArray(double[] a1,double[] a2){
+		for(int i=0; i<a1.length; i++){
+			a1[i]-=a2[i];
+		}
+	}
+	public static void addArray(double[] a1,double num){
+		for(int i=0; i<a1.length; i++){
+			a1[i]+=num;
+		}
+	}
+	public static void addMultArray(double[] a1,double[] a2, double mult){
+		for(int i=0; i<a1.length; i++){
+			a1[i]+=a2[i]*mult;
+		}
+	}
+	public static void multArray(double[] a1, double mult){
+		for(int i=0; i<a1.length; i++){
+			a1[i]*=mult;
+		}
+	}
+	public static void addArray(double[] a1,double[] a2){
+		for(int i=0; i<a1.length; i++){
+			a1[i]+=a2[i];
+		}
+	}
+	public static void divideArray(double[] a1,double div){
+		for(int i=0; i<a1.length; i++){
+			a1[i]/=div;
+		}
+	}
+	private static  void vectorClearZero(double var[])
+	{
+		for (int i = 0; i < var.length; i++) {
+			var[i] = 0;
+		}
+	}
+	private static void copyVec(double desVec[], double srcVec[])
+	{
+		if (desVec == null) {
+			desVec = new double[srcVec.length];
+		}
+		if (desVec.length <  srcVec.length) {
+			throw new RuntimeException("Vector can not copy! des vector is too short!");
+		}
+		for (int i = 0; i < srcVec.length; i++) {
+			desVec[i] = srcVec[i]; // copy
+		}
+	}
+	public void normalize(double[] a1){
+		divideArray(a1, oneNorm(a1));
+	}
+	public double oneNorm(double[] a1){
+		double result=0.0;
+		for(double d:a1){
+			result+=Math.abs(d);
+		}
+		return result;
+	}
+	public void printFeatureWeights(double[] w){
+		String[] localF = getBinarizer().getFeatureNames(getLocalFeatures());
+		int i = 0;
+		for(String feat:localF){
+			System.out.println(feat+"\t="+w[i++]);
+		}
+		for(ClusterFeature clFeat:getClusterFeatures()){
+			System.out.println(clFeat.getName()+"\t="+w[i++]);
+		}
+	}
+	public void printFeatures(double[] w){
+		String[] localF = getBinarizer().getFeatureNames(getLocalFeatures());
+		int i = 0;
+		for(String feat:localF){
+			System.out.print(feat+"="+df.format(w[i++])+" ** ");
+		}
+		for(ClusterFeature clFeat:getClusterFeatures()){
+			System.out.print(clFeat.getName()+"="+w[i++]+" ** ");
+		}
+		for(;i<w.length;i++)
+			System.out.print("terminate="+df.format(w[i++])+" ** ");
+		System.out.println();
+	}
+	public void recordFeatureNames(double[] w){
+		featNames = new ArrayList<String>();
+		featWeights = new HashMap<String, Double>();
+		featNames.clear();
+		featWeights.clear();
+		
+		String[] localF = getBinarizer().getFeatureNames(getLocalFeatures());
+		int i = 0;
+		String name;
+		Double weight;
+		for(String feat:localF){
+			name = feat.toString();
+			weight = w[i++];
+			//System.out.print(feat+"="+df.format(w[i++])+" ** ");
+			featNames.add(name);
+			featWeights.put(name, weight);
+		}
+		for(ClusterFeature clFeat:getClusterFeatures()){
+			name = "Cl"+clFeat.getName();
+			weight = w[i++];
+			//System.out.print(clFeat.getName()+"="+w[i++]+" ** ");
+			featNames.add(name);
+			featWeights.put(name, weight);
+		}
+		for(;i<w.length;i++) {
+			name = "NOOP-threshold";
+			weight = w[i++];
+			//System.out.print("terminate="+df.format(w[i++])+" ** ");
+			featNames.add(name);
+			featWeights.put(name, weight);
+		}
+		//System.out.println();
+	}
+	public void printClFeatures(double[] w){
+		int i = getNumLocalFeatures();
+		for(ClusterFeature clFeat:getClusterFeatures()){
+			System.out.print(clFeat.getName()+"="+df.format(w[i++])+" ** ");
+		}
+		System.out.println();
+	}
+	private int getNumLocalFeatures() {
+		if(numLocalFeatures<=0){
+			String[] localF = getBinarizer().getFeatureNames(getLocalFeatures());
+			numLocalFeatures=localF.length;
+		}
+		return numLocalFeatures;
+	}
+
+	public void printFeatureValues(HashMap<ClusterFeature, String> feats){
+		for(ClusterFeature clFeat:feats.keySet()){
+			System.out.print(clFeat.getName()+"="+feats.get(clFeat)+" ** ");
+		}
+		System.out.println();
+	}
+	public int getNumClusters(AnnotationSet ces){
+		HashSet<String> clusters = new HashSet<String>();
+		for(Annotation c:ces)
+			clusters.add(c.getAttribute(Constants.CLUSTER_ID));
+		return clusters.size(); 
+	}
+
+	public boolean includePair(Annotation np1, Annotation np2, Document doc, Map<Annotation,ArrayList<Annotation>> posessives){
+		// Config-- Switch in cfg, by Chao Ma ------------------------------
+		if (Utils.getConfig().APPLY_ACTION_PRUNING == false) {
+			return true; // do nothing if do not need this pruning (Chao, 2013-1-30)
+		}
+		// ----------------------------------------------------------------
+		int maxDistance = 40;
+		RuleResolvers.NPType type2 = RuleResolvers.getNPtype(np2, doc, posessives);
+		// int par2 = ParNum.getValue(np2, doc);
+		int sen2 = SentNum.getValue(np2, doc);
+		//int par2 = ParNum.getValue(np2, doc);
+		boolean pn2 = type2.equals(RuleResolvers.NPType.PROPER_NAME);
+		boolean pron2 = type2.equals(RuleResolvers.NPType.PRONOUN);
+		boolean def2 = !pron2 && !pn2 && !FeatureUtils.isIndefinite(np2, doc);
+		boolean specPronoun2 = pron2 && FeatureUtils.getPronounPerson(doc.getAnnotText(np2)) != PersonPronounTypeEnum.THIRD;
+		boolean person2 = pn2 && ProperNameType.getValue(np2, doc).equals(FeatureUtils.NPSemTypeEnum.PERSON);
+		RuleResolvers.NPType type1 = RuleResolvers.getNPtype(np1, doc, posessives);
+		// int par1 = ParNum.getValue(np1, doc);
+		// int parNum = Math.abs(par1 - par2);
+		int sen1 = SentNum.getValue(np1, doc);
+		//int par1 = ParNum.getValue(np1, doc);
+		int senNum = Math.abs(sen1 - sen2);
+		//int parNum = Math.abs(par1 - par2);
+		boolean pron1 = type1.equals(RuleResolvers.NPType.PRONOUN);
+		boolean pn1 = type1.equals(RuleResolvers.NPType.PROPER_NAME);
+		boolean specPronoun1 = pron1 && FeatureUtils.getPronounPerson(doc.getAnnotText(np1)) != PersonPronounTypeEnum.THIRD;
+		boolean person1 = pn1 && ProperNameType.getValue(np1, doc).equals(FeatureUtils.NPSemTypeEnum.PERSON);
+		boolean includePair = false;
+		if (pn1 && pn2 && senNum <= maxDistance) {
+			if(senNum<=3)
+				includePair = true;
+			String[] words1 = Words.getValue(np1, doc);
+			String[] words2 = Words.getValue(np2, doc);
+			if (FeatureUtils.overlaps(words1, words2))
+				includePair = true;
+		}
+		else if (person2 && specPronoun1&& senNum <= maxDistance) {
+			includePair = true;
+		}
+		else if (specPronoun1 && (specPronoun2 || person2)&& senNum <= maxDistance) {
+			includePair = true;
+		}
+		else if (specPronoun2 && (specPronoun1 || person1)&& senNum <= maxDistance) {
+			includePair = true;
+		}
+		else if (def2 && !pron1 && (senNum <= 5)) {
+			includePair = true;
+		}else if (pron2){
+			if(senNum<=3)
+				includePair = true;
+		}else if (senNum <= 3) {
+			includePair = true;
+		}
+		return includePair;
+	}
+	
+	// Modified by Chao Ma (6-23-2013)
+	public boolean includePairChao(Annotation np1, Annotation np2, Document doc, Map<Annotation,ArrayList<Annotation>> posessives){
+		int maxDistance = 40;
+		RuleResolvers.NPType type2 = RuleResolvers.getNPtype(np2, doc, posessives);
+		// int par2 = ParNum.getValue(np2, doc);
+		int sen2 = SentNum.getValue(np2, doc);
+		//int par2 = ParNum.getValue(np2, doc);
+		boolean pn2 = type2.equals(RuleResolvers.NPType.PROPER_NAME);
+		boolean pron2 = type2.equals(RuleResolvers.NPType.PRONOUN);
+		boolean def2 = !pron2 && !pn2 && !FeatureUtils.isIndefinite(np2, doc);
+		boolean specPronoun2 = pron2 && FeatureUtils.getPronounPerson(doc.getAnnotText(np2)) != PersonPronounTypeEnum.THIRD;
+		boolean person2 = pn2 && ProperNameType.getValue(np2, doc).equals(FeatureUtils.NPSemTypeEnum.PERSON);
+		RuleResolvers.NPType type1 = RuleResolvers.getNPtype(np1, doc, posessives);
+		// int par1 = ParNum.getValue(np1, doc);
+		// int parNum = Math.abs(par1 - par2);
+		int sen1 = SentNum.getValue(np1, doc);
+		//int par1 = ParNum.getValue(np1, doc);
+		int senNum = Math.abs(sen1 - sen2);
+		//int parNum = Math.abs(par1 - par2);
+		boolean pron1 = type1.equals(RuleResolvers.NPType.PRONOUN);
+		boolean pn1 = type1.equals(RuleResolvers.NPType.PROPER_NAME);
+		boolean specPronoun1 = pron1 && FeatureUtils.getPronounPerson(doc.getAnnotText(np1)) != PersonPronounTypeEnum.THIRD;
+		boolean person1 = pn1 && ProperNameType.getValue(np1, doc).equals(FeatureUtils.NPSemTypeEnum.PERSON);
+		boolean includePair = false;
+		
+		/*
+		
+		if (pn1 && pn2 && senNum <= maxDistance) {
+			if(senNum<=3)
+				includePair = true;
+			String[] words1 = Words.getValue(np1, doc);
+			String[] words2 = Words.getValue(np2, doc);
+			if (FeatureUtils.overlaps(words1, words2))
+				includePair = true;
+		}
+		else if (person2 && specPronoun1&& senNum <= maxDistance) {
+			includePair = true;
+		}
+		else if (specPronoun1 && (specPronoun2 || person2)&& senNum <= maxDistance) {
+			includePair = true;
+		}
+		else if (specPronoun2 && (specPronoun1 || person1)&& senNum <= maxDistance) {
+			includePair = true;
+		}
+		else if (def2 && !pron1 && (senNum <= 5)) {
+			includePair = true;
+		}else if (pron2){
+			if(senNum<=3)
+				includePair = true;
+		}else if (senNum <= 3) {
+			includePair = true;
+		}*/
+		return includePair;
+	}
+
+	void printArray(double[] w){
+		System.out.print("[");
+		boolean first = true;
+		//for(int i=0; i<8 && i<w.length; i++){
+		for(int i=0; i<w.length; i++){
+			if(!first){
+				System.out.print(", ");
+			}else
+				first = false;
+			System.out.print(df.format(w[i]));
+		}
+		System.out.println("]");//("..., "+df.format(w[w.length-2])+"]");
+	}
+	public String formatTime(long timeMillis){
+		long time = timeMillis / 1000;  
+		String seconds = Integer.toString((int)(time % 60));  
+		String minutes = Integer.toString((int)((time % 3600) / 60));  
+		String hours = Integer.toString((int)(time / 3600));  
+		for (int i = 0; i < 2; i++) {  
+			if (seconds.length() < 2) {  
+				seconds = "0" + seconds;  
+			}  
+			if (minutes.length() < 2) {  
+				minutes = "0" + minutes;  
+			}  
+			if (hours.length() < 2) {  
+				hours = "0" + hours;  
+			}  
+		}
+		return hours+":"+minutes+":"+seconds;
+	}
+	public int max(int i,int j){
+		return i>j?i:j;
+	}
+
+	private Action getBestTrueAction(Action[] allActions)
+	{
+		double bestScore = -Double.MAX_VALUE;
+		Action bestTrueAct = null;
+		for (Action act : allActions) {
+			if (act.trueScore > bestScore) {
+				bestScore = act.trueScore;
+				bestTrueAct = act;
+			}
+		}
+		return bestTrueAct;
+	}
+
+	// by Chao Ma
+	public ActionList genAllActions(HashMap<Integer,CorefChain> chainState, int ceId, Document doc, AnnotationSet ces, double[] wPos, double[] wNeg, boolean training)
+	{
+		//System.out.println("Action generator, generate actions for a given state!"); 
+		boolean orderRestriction = Utils.getConfig().ACT_ORDER_RESTRICT;//true;//false;
+		boolean output = false;
+
+		double[] emptyLocalVec = new double[1];
+		double   emptyLocalWgt = Double.MIN_VALUE; 
+
+		ActionList sortedActions = new ActionList();
+		DiscrepancySet disSet = doc.getDiscrepancySet();
+
+		//System.out.println("=========Policy is working on: "+doc.getDocumentId()+" at step "+ceId+"=============");
+		int n_actions = 0;
+		int ACT_MERGE = 1;
+		int ACT_NOP = 0; 
+		boolean NO_NOP = false;
+
+		// gen all action
+		// action generation -------------------------------------------------------
+		if (chainState.size() <= 0) {
+			throw new RuntimeException("State should contain at least one cluster!");
+		}
+
+		// find the first unprocessed chain
+		int unprocessChains = 0;
+		int processChains   = 0;
+		CorefChain[] chainArray = getOrderedChainArr(chainState);
+		CorefChain chain1 = chainArray[0];
+		CorefChain chain2 = null;
+		boolean has_nonprocecssed = false;
+		
+		//for (int i=0; i < chainState.size(); i++) {
+		//	System.out.println("id="+i+":  "+chainArray[i].toString());
+		//}
+		
+		for (int i=0; i < chainState.size(); i++) {
+			chain1 = chainArray[i];
+			if (chain1.getProcessed() == false) {
+				unprocessChains++;
+				has_nonprocecssed = true;
+				//break;
+			} else {
+				processChains++;
+			}
+		}
+
+		// all has been processed
+		if (has_nonprocecssed == false) {
+			//throw new RuntimeException("No non-processed cluster anymore!");
+			Action nullact = new Action();
+			//sortedActions.add(nullact);
+			return sortedActions; // no action can be done now ...
+		}
+
+		// for init state (all has not been processed)
+		if (processChains == 0) {
+			// at least there is one chain that is processed.
+			chainArray[0].setProcessed(true);
+		}
+
+		AnnotationSet gces = doc.getAnnotationSet(Constants.GS_NP);
+
+		int mergeConstraintCount = 0;
+		int splitConstraintCount = 0;
+		for (int k = 0; k < chainState.size(); k++) {
+			boolean hasCorefChain = false; // whether this mention can be merged into any cluster?
+			chain1 = chainArray[k];
+			if (chain1.getProcessed() == true) { // we need chain1.processed == false
+				continue; 
+			}
+			
+			//System.out.println("ActionGen processing mention "+chain1.getFirstCe().getAttribute(Constants.CE_ID)+" with chainID "+chain1.id);
+
+			// try to merge it into a processed chain
+			for (int j=0; j < chainState.size(); j++) {
+				chain2 = chainArray[j];
+				//CorefChain c1,c2;
+				if (chain2.getProcessed() == false) { // we need chain2.processed == true
+					continue;
+				}
+
+				//c1=chain1;
+				//c2=chain2;
+				if (chain2.before(chain1)) {
+					// correct
+ 				} else {
+ 					//entityToStr(chain1, doc, ces);
+ 					//entityToStr(chain2, doc, ces);
+ 					//System.out.println("chain2 should appear before chain1!");
+ 					continue;
+					//throw new RuntimeException("chain2 should appear before chain1!");
+				}
+				
+				boolean canMerge = true;
+/*
+				// ----------- Check discrepancy constriants for this cluster pair ---------------
+				// First, is there any discrepancy for chain1(singletion) mention?
+				HashSet<DiscrepancyItem> allDisItemForThisMention = new HashSet<DiscrepancyItem>();
+				Annotation singletonMen = chain1.getFirstCe();
+				int singletonMenId = Integer.parseInt(singletonMen.getAttribute(Constants.CE_ID));
+				for (DiscrepancyItem item : disSet.getAllDiscreItems().values()) {
+					if (item.firstMenID == singletonMenId) { // this discrepancy is related to this mention
+						DiscrepancyItem itemCopy = new DiscrepancyItem(item);
+						allDisItemForThisMention.add(itemCopy);
+					}
+				}
+				
+				// Second, if first is true, then is this action satisfy the discrepancy?
+				if (allDisItemForThisMention.size() > 0) {
+					for (DiscrepancyItem relatedItem : allDisItemForThisMention) {
+						// is this a NO-OP discrepancy?
+						if (relatedItem.secondMenID == -1) {
+							canMerge = false;
+							NO_NOP = false;
+						// this is a "Link-To" discrepancy
+						} else {
+							canMerge = false;
+							for (Annotation ce2 : chain2.getCes()) {
+								int ceId2 = Integer.parseInt(ce2.getAttribute(Constants.CE_ID));
+								if (relatedItem.secondMenID == ceId2) {
+									canMerge = true;
+									NO_NOP = true; // do not allow NOP here, because if this must link constraint
+									break;
+								}
+							}
+						}
+					}
+				}
+				// --------- End of checking discrepancy constriants for this cluster pair ------------
+*/
+				// gen all merge actions
+				if (canMerge) {
+					n_actions++;
+					//Action curAction = new Action(c1.getId(), c2.getId(), localWeight, localVector);
+					CorefChain antecedentClust = chain2;
+					CorefChain singleClust = chain1;
+					Annotation operatedMen = chain1.getFirstCe();
+					
+					int clust1 = Integer.parseInt(operatedMen.getAttribute(Constants.CLUSTER_ID));
+					int clust2 = Integer.parseInt(chain2.getFirstCe().getAttribute(Constants.CLUSTER_ID));
+					int opmid = Integer.parseInt(operatedMen.getAttribute(Constants.CE_ID));
+					
+					Action curAction = new Action(clust1, clust2,  ACT_MERGE, opmid, emptyLocalWgt, emptyLocalVec);
+					curAction.setActName(ACT_MERGE); // this is a merge
+					
+					sortedActions.insertAction(curAction);
+				}// if discrepancy set allow this merge
+			}
+			
+			if (!NO_NOP) {
+				// NOP Action
+				int singleCl = Integer.parseInt(chain1.getFirstCe().getAttribute(Constants.CLUSTER_ID));
+				int operatedMid = Integer.parseInt(chain1.getFirstCe().getAttribute(Constants.CE_ID));
+				Action nopAction = new Action(singleCl, -1, ACT_NOP, operatedMid, emptyLocalWgt, emptyLocalVec); // this is an action of "do nothing"
+				nopAction.setActName(ACT_NOP);
+			
+				sortedActions.insertAction(nopAction); // add nop action into the quee
+			}
+/*
+			// NOP action
+			double[] nopLocal = new double[numLocalFeatures];
+			Action nopAction = new Action(-1,-1,0,nopLocal);
+			double[] nopCl = new double[getClusterFeatures().size()];
+			nopAction.first = chain1.getId();
+			nopAction.setWeight(nopWeight, nopCl);
+			// --------------------------------------------------
+			double[] zeroVector = new double[nopLocal.length + nopCl.length + 1];
+			for (int j = 0; j < (nopLocal.length + nopCl.length); j++) {
+				zeroVector[j] = 0;
+			}
+			zeroVector[nopLocal.length + nopCl.length] = 1.0;
+			// --------------------------------------------------
+			nopAction.setFeatureVector(zeroVector);
+
+			nopAction.setActName(ACT_NOP);
+			nopAction.setIsTarget(false); // suppose it is not target action
+			if (training && hasCorefChain == false) {
+				nopAction.setIsTarget(true);
+				//System.out.println("-- Target Action: Nop action!");
+			}
+			sortedActions.insertAction(nopAction);
+*/
+			/*
+			if ((chain1.getProcessed() == false) && orderRestriction) {
+				// only allow to pick one processed mention, if in restricted ordering case
+				break; 
+			}*/
+			if (chain1.getProcessed() == false) {
+				break;
+			}
+
+		}// for chain1
+
+		// calculate scores
+		return sortedActions;
+	}
+	
+	private CorefChain getOneUnprocessedSingleton(HashMap<Integer,CorefChain> chainState)
+	{
+		CorefChain[] chainArray = getOrderedChainArr(chainState);
+		CorefChain chain1 = chainArray[0];
+		boolean has_nonprocecssed = false;
+		
+		// the first has only, so it should be ignored
+		if (chainArray[0].getProcessed() == false) {
+			chainArray[0].setProcessed(true); // HACK!!
+		}
+		
+		// because the first unprocessed chain can not linked to any of tis antecedent (it has no antecedent, because it is the first one!)
+		// so we usually ingore the first mention (its action can only be NO-OP!), and suppose that is has been processed.
+		// So we start from 1
+		for (int i = 1; i < chainState.size(); i++) {
+			chain1 = chainArray[i];
+			if (chain1.getProcessed() == false) {
+				if (i != 0) {
+					has_nonprocecssed = true;
+					return chain1;
+				}
+			}
+		}
+		
+		return null; // no unprocessed chain
+	}
+	
+	public boolean isLegalAction()
+	{
+		return true;
+	}
+
+	/** coreference chain comparator */
+	public static class ChainComparator implements Comparator<CorefChain> {
+		@Override
+		public int compare(CorefChain chain1, CorefChain chain2) {
+			int result = chain1.compareTo(chain2);
+			return result;
+		}
+	}
+	
+	/** Score comparator */
+	public static class ScoreComparator implements Comparator<Double> {
+		public int compare(Double s1, Double s2) {
+			if ((s1 - s2) >= 0) return -1;
+			return 1;
+		}
+	}
+	
+	public ArrayList<Action> actionArraytoList(Action[] actarray)
+	{
+		ArrayList<Action> mylist = new ArrayList<Action>();
+		for (Action act : actarray) {
+			mylist.add(act);
+		}
+		return mylist;
+	}
+	
+	/** Action comparator 1: ordered actions by the pred-score*/
+	public static class ActionPredScoreComparator implements Comparator<Action> {
+		public int compare(Action a1, Action a2) {
+			if ((a1.predScore - a2.predScore) >= 0) return -1;
+			return 1;
+		}
+	}
+	
+	/** Action comparator 2: ordered actions by the true-score */
+	public static class ActionTrueScoreComparator implements Comparator<Action> {
+		public int compare(Action a1, Action a2) {
+			if ((a1.trueScore - a2.trueScore) >= 0) return -1;
+			return 1;
+		}
+	}
+	
+	/** Action comparator 2: ordered actions by the true-score */
+	public static class ActionRankIndexComparator implements Comparator<Action> {
+		public int compare(Action a1, Action a2) {
+			if ((a1.rankIdx - a2.rankIdx) >= 0) return -1;
+			return 1;
+		}
+	}
+	
+	/** Discrepancy comparator (according to weight) 
+	 *  The first item usually has the max "weight" 
+	 */
+	public static class DiscrepancyWeightComparator implements Comparator<DiscrepancyItem> {
+		@Override
+		public int compare(DiscrepancyItem item1, DiscrepancyItem item2) {
+			// NOTE: There are two way to sort the items (2013-5-14)
+				
+			// way1 (internal order first)
+			// the smaller weight pair will apear in front
+			if (item1.weightPair < item2.weightPair) {
+				return -1;
+			} else if (item1.weightPair > item2.weightPair) {
+				return 1;
+			} else if (item1.weightPair == item2.weightPair) {
+				// the larger weightCl pair will apear in front
+				if (item1.weightCl >= item2.weightCl) {
+					return -1;
+				} else if (item1.weightCl < item2.weightCl) {
+					return 1;
+				}
+			}
+			
+			return 0;
+		}
+	}
+	
+	/** Pair discrepancy comparator (according to weight) 
+	 *  A larger pair score discrepancy will rank higher
+	 */
+	public static class DiscrepancyPairComparator implements Comparator<DiscrepancyItem> {
+		@Override
+		public int compare(DiscrepancyItem item1, DiscrepancyItem item2) {
+			// a larger pair score will rank higher
+			if (item1.weightPair >= item2.weightPair) {
+				return -1;
+			} else if (item1.weightPair < item2.weightPair) {
+				return 1;
+			}
+			return 0;
+		}
+	}
+	
+	private CorefChain[] getOrderedChainArr(HashMap<Integer,CorefChain> chainState)
+	{
+		// build list
+		List<CorefChain> chainList = new ArrayList<CorefChain>();
+		for (CorefChain chain : chainState.values()) {
+			chainList.add(chain);
+		}
+		// sort
+		Collections.sort(chainList, new ChainComparator());
+
+		// cast to array and return
+		CorefChain[] chainArr = chainList.toArray(new CorefChain[1]);
+		
+		//for (int i = 0; i < chainArr.length; i++) {
+		//	int cid = chainArr[i].id;
+		//	System.out.println("Ordered Chain id = "+cid);
+		//}
+		
+		return chainArr;
+	}
+
+	// prun nothing
+	private ActionList policyPrunning1(HashMap<Integer,CorefChain> chainState, Document doc, AnnotationSet ces, ActionList originalList)
+	{
+
+		int ACT_MERGE = 1;
+		int ACT_NOP = 0; 
+		int originalNAct = originalList.size();
+		int afterPrunNAct = 0;
+		
+/*
+		boolean Rule1 = true;
+		boolean Rule2 = false;
+		
+		
+		//RuleResolvers.ruleResolvePronouns(chainState, doc);
+		//HashMap<Annotation, ArrayList<Annotation>> posessives = new HashMap<Annotation, ArrayList<Annotation>>();
+		//RuleResolvers.addAllPossesives(doc.getAnnotationSet(Constants.NP), doc, posessives);
+		//RuleResolvers.addAllPossesives(ces, doc, posessives);
+
+
+		for (Action act : originalList) {
+			act.prunned = 0;
+			Annotation involvedMen = null;
+			CorefChain involvedClust = null;
+			CorefChain singletonClust = null;
+
+			// involved cluster
+			involvedClust = chainState.get(act.second);
+			// singleton cluster
+			singletonClust = chainState.get(act.first);
+			// involved mention
+			involvedMen = singletonClust.getFirstCe();
+			
+			if (act.getActName() == ACT_MERGE) {
+				if (singletonClust == null) throw new RuntimeException("singletonClust null pointer");
+				if (involvedClust == null) throw new RuntimeException("involvedClust null pointer");
+				if (involvedMen == null) throw new RuntimeException("involvedMen null pointer");
+
+				// 2.
+				// Rule 2 =====================
+				if (Rule2) {
+					HashMap<ClusterFeature, String> featVector = new HashMap<ClusterFeature, String>();
+					String constraints = Constructor.createClusterFeature("Constraints").getValue(involvedClust, singletonClust, doc, featVector);
+					if (constraints.equals(reconcile.featureVector.NominalClusterFeature.COMPATIBLE)) {
+
+					} else {
+						act.prunned = 1; // constraint prunning
+					}
+				}
+				// ============================
+
+			} else if (act.getActName() == ACT_NOP) {
+				// 1.
+				// Rule 1 =====================
+				if (Rule1) {
+					boolean isProNoun = FeatureUtils.isPronoun(involvedMen, doc);
+					if (isProNoun && act.getActName() == ACT_NOP) {
+						act.prunned = 2; // first not pronoun prunning
+						//System.out.println("SplitFirstNotPronounPrun!!");
+						//System.out.print("cataphora? ");printMention(involvedMen, doc);
+					}
+				}
+				// ============================
+			}
+		}
+*/
+		
+/*	
+		// get processive at Easy-first did, prepare for policy pruning
+		// Thanks to Dr. Stoyanov(Veselin Stoyanov)
+	    RuleResolvers.ruleResolvePronouns(chainState, doc);
+	    HashMap<Annotation, ArrayList<Annotation>> posessives = new HashMap<Annotation, ArrayList<Annotation>>();
+	    RuleResolvers.addAllPossesives(ces, doc, posessives);
+		
+		int nPruned = 0;
+		for (Action act : originalList) {
+			act.prunned = 0;
+			Annotation involvedMen = null;
+			CorefChain involvedClust = null;
+			CorefChain singletonClust = null;
+			int voilation = 0;
+
+			// involved cluster
+			involvedClust = chainState.get(act.second);
+			// singleton cluster
+			singletonClust = chainState.get(act.first);
+			// involved mention
+			involvedMen = singletonClust.getFirstCe();
+			
+			if (act.getActName() == ACT_MERGE) {
+				if (singletonClust == null) throw new RuntimeException("singletonClust null pointer");
+				if (involvedClust == null) throw new RuntimeException("involvedClust null pointer");
+				if (involvedMen == null) throw new RuntimeException("involvedMen null pointer");
+
+				for (Annotation ce : involvedClust.getCes()) {
+					Annotation firstCe = ce;
+					Annotation secondCe = involvedMen;
+					if (secondCe.compareSpan(firstCe) < 0) {
+						firstCe = involvedMen;
+						secondCe = ce;
+					}
+					if (!includePair(firstCe, secondCe, doc,posessives)) {
+						voilation++;
+					}
+				}
+				
+				if (voilation > 2) {
+					act.prunned = 1;
+					nPruned++;
+				}
+
+			} else if (act.getActName() == ACT_NOP) {
+				
+			}
+		}
+
+		afterPrunNAct = originalNAct - nPruned;
+		//System.out.println("OriginNAct = " + originalNAct + " AfterPolicyPruning = " + afterPrunNAct);
+*/	
+		return originalList;
+	}
+	
+
+	
+	//fasdfasdf
+	private ActionList policyPrunning(HashMap<Integer,CorefChain> chainState, Document doc, AnnotationSet ces, ActionList originalList,
+			double[] wPronominal, double[] wPronoun)
+	{
+		String huerLoss = "BCubedScore";
+		int ACT_MERGE = 1;
+		int ACT_NOP = 0; 
+		int originalNAct = originalList.size();
+		int afterPrunNAct = 0;
+		
+		
+		boolean isActionInvolvePronoun = false;
+		HashMap<Double, HashSet<Action>> actionScoresMap = new HashMap<Double, HashSet<Action>>();
+		Action[] allLegalActions = originalList.toArray(new Action[1]);
+
+		// about true best action (for prunning evaluation)
+		double bestTrueScore = -Double.MAX_VALUE;
+		Action trueBestAct = null;
+		
+		actionScoresMap.clear();
+		for (int k = 0; k < allLegalActions.length; k++) {
+			// is current action operating a pronoun
+			if (true) {
+				CorefChain singletonClust = chainState.get(allLegalActions[k].first);
+				Annotation involvedMen = singletonClust.getFirstCe();
+				boolean isProNoun = FeatureUtils.isPronoun(involvedMen, doc);
+				if (isProNoun) {
+					isActionInvolvePronoun = true;
+				}
+			}
+
+			// do a move ++++++++
+			int oldClustId = doTry(chainState, doc, ces, allLegalActions[k]);
+			// ++++++++++++++++++
+
+			/// true loss score
+			double[] trueScoreArr2 = getSpecificScoreArray(ces, doc, huerLoss);
+			double trueScore = trueScoreArr2[2];
+			if (trueScore > bestTrueScore) {
+				bestTrueScore = trueScore;
+				trueBestAct = allLegalActions[k];
+			}
+			
+			/// pruner model score
+			double score = -Double.MAX_VALUE;
+			if (false) {
+
+			} else {
+				//double[] featVec = genActionFeatVec(chainState, doc, ces, allLegalActions[k]);
+				double[] featVec = genActionFeatVecLongerNOOP(chainState, doc, ces, allLegalActions[k]);
+				
+				if (isActionInvolvePronoun) {
+					// pronoun
+					score = innerProduct(featVec, wPronoun);
+				} else {
+					// non-pronoun
+					score = innerProduct(featVec, wPronominal);
+				}
+				if (prunUseRanklib) {
+					//System.out.println("RankLib prunningRankLib prunningRankLib prunningRankLib prunning!! " + prunRanker.getModelPath());
+					score = prunRanker.getRankerScore(featVec);
+					//System.out.println("Pruner score "+score);
+				}
+
+				// put score - action hash
+				if (actionScoresMap.containsKey(score)) {
+					HashSet<Action> actionWithThisScore = actionScoresMap.get(score);
+					actionWithThisScore.add(allLegalActions[k]);
+				} else {
+					HashSet<Action> actionWithThisScore = new HashSet<Action>();
+					actionWithThisScore.add(allLegalActions[k]);
+					actionScoresMap.put(score, actionWithThisScore);
+				}
+			}
+
+			// undo a move ++++++++
+			undoTry(chainState, doc, ces, allLegalActions[k], oldClustId);
+			// ++++++++++++++++++++
+		}
+
+		// show something ---------------------
+		Double[] scoreArr = orderActionScores(actionScoresMap.keySet());
+		/*
+			for (int i = 0; i < scoreArr.length; i++) {
+			HashSet<Action> actionWithThisScore = actionScoresMap.get(scoreArr[i]);
+				System.out.print("Score "+scoreArr[i]+" rank("+(i+1)+"): ");
+				for (Action anyact : actionWithThisScore) {
+					printAction(chains, doc, ces, anyact);
+				}
+			}
+			System.out.println("==================================================");
+		 */
+		// begin to prun some actions
+		ActionList afterPruningList = new ActionList();
+		afterPruningList.clear();
+
+		int rankingLimit = pruningFactor;
+		if (rankingLimit > scoreArr.length) {
+			rankingLimit = scoreArr.length;
+		}
+
+		int trueBestRank = -1;
+		boolean containTrueBest = false;
+		afterPrunNAct = 0;
+		for (int i = 0; i < rankingLimit; i++) {
+			HashSet<Action> actionWithThisScore = actionScoresMap.get(scoreArr[i]);
+			//System.out.print("Score "+scoreArr[i]+" rank("+(i+1)+"): ");
+			for (Action anyact : actionWithThisScore) {
+				//printAction(chainState, doc, ces, anyact);
+				afterPruningList.insertAction(anyact);
+				afterPrunNAct++;
+				
+				if (anyact.isSameAction(trueBestAct)) {
+					containTrueBest = true;
+					trueBestRank = i;
+				}
+			}
+
+		}
+
+		// how many has been prunned?
+		//System.out.println("OriginNAct = " + originalNAct + " AfterPolicyPruning = " + afterPrunNAct);
+
+		// check prunning performance: good prunning or bad prunning?
+		totalPrunningStep++;
+		if (containTrueBest) {
+			goodPrunningStep++;
+		}
+		//System.out.println("Prunning performance: " + goodPrunningStep + "/" + totalPrunningStep + " " + "trueBestRank = " + trueBestRank);
+		
+		return originalList;
+		//return afterPruningList;
+	}
+	
+	
+	//fasdfasdf
+	private ActionList policyPrunningAssemble(HashMap<Integer,CorefChain> chainState, Document doc, AnnotationSet ces, ActionList originalList,
+			double[] wPronominal, double[] wPronoun)
+	{
+		String huerLoss = "BCubedScore";
+		int ACT_MERGE = 1;
+		int ACT_NOP = 0; 
+		int originalNAct = originalList.size();
+		int afterPrunNAct = 0;
+		
+		
+		boolean isActionInvolvePronoun = false;
+
+		Action[] allLegalActions = originalList.toArray(new Action[1]);
+
+		double[][] allRankingIndices = new double[allLegalActions.length][8];
+		
+		// about true best action (for prunning evaluation)
+		double bestTrueScore = -Double.MAX_VALUE;
+		Action trueBestAct = null;
+		
+		
+		//int[] possibleBeam = { 2, 3, 4, 5, 6, 8, 10, 20 };
+		for (int j = 0; j < 5; j++) {
+			//int beamSize = possibleBeam[j];
+			ArrayList<Action> tmplist = new ArrayList<Action>();
+
+			int  k;
+			for (k = 0; k < allLegalActions.length; k++) {
+				tmplist.add(allLegalActions[k]);
+				tmplist.get(k).rankIdx = k;
+
+				// is current action operating a pronoun
+				if (true) {
+					CorefChain singletonClust = chainState.get(allLegalActions[k].first);
+					Annotation involvedMen = singletonClust.getFirstCe();
+					boolean isProNoun = FeatureUtils.isPronoun(involvedMen, doc);
+					if (isProNoun) {
+						isActionInvolvePronoun = true;
+					}
+				}
+
+				// do a move ++++++++
+				int oldClustId = doTry(chainState, doc, ces, allLegalActions[k]);
+				// ++++++++++++++++++
+
+				/// true loss score
+				double[] trueScoreArr2 = getSpecificScoreArray(ces, doc, huerLoss);
+				double trueScore = trueScoreArr2[2];
+				if (trueScore > bestTrueScore) {
+					bestTrueScore = trueScore;
+					trueBestAct = allLegalActions[k];
+				}
+
+				/// pruner model score
+				double score = -Double.MAX_VALUE;
+				if (false) {
+
+				} else {
+					//double[] featVec = genActionFeatVec(chainState, doc, ces, allLegalActions[k]);
+					double[] featVec = genActionFeatVecLongerNOOP(chainState, doc, ces, allLegalActions[k]);
+					if (isActionInvolvePronoun) {
+						// pronoun
+						score = innerProduct(featVec, wPronoun);
+					} else {
+						// non-pronoun
+						score = innerProduct(featVec, wPronominal);
+					}
+					/*
+					if (prunUseRanklib) {
+						System.out.println("RankLib prunningRankLib prunningRankLib prunningRankLib prunning!! " + prunRanker.getModelPath());
+						score = prunRanker.getRankerScore(featVec);
+						//System.out.println("Pruner score "+score);
+					}
+					 */
+
+					if (prunerAssemble) {
+						score = assemPruners[j].getRankerScore(featVec);
+						tmplist.get(k).predScore = score;
+						System.out.println("predScore = " + score + " originalIdx = " + k);
+					}
+
+
+				}
+
+				// undo a move ++++++++
+				undoTry(chainState, doc, ces, allLegalActions[k], oldClustId);
+				// ++++++++++++++++++++
+			}
+
+			Collections.sort(tmplist, new ActionPredScoreComparator());
+			for (k = 0; k < tmplist.size(); k++) {
+				int idx = (int)(tmplist.get(k).rankIdx);
+				allRankingIndices[idx][j] = (k + 1);
+				System.out.println("originalIdx " + idx + " thisranking = " + (k + 1));
+			}
+
+		}
+
+		HashMap<Double, HashSet<Action>> actionScoresMap = new HashMap<Double, HashSet<Action>>();
+		actionScoresMap.clear();
+		
+			//int beamSize = possibleBeam[j];
+			//ArrayList<Action> tmplist = new ArrayList<Action>();
+
+			//int  k;
+		for (int k = 0; k < allLegalActions.length; k++) {
+			double sumIndex = 0, avgIndex;
+			for (int j = 0; j < 5; j++) {
+				sumIndex += allRankingIndices[k][j];
+				System.out.println("Action " + k + " pruner " + j + " ranking " + allRankingIndices[k][j]);
+			}
+			avgIndex = (-1.0) * (sumIndex / 5.0); // use index as score, score with accend ordering
+			System.out.println("Action " + k + " average ranking " + avgIndex);
+			
+			// put score - action hash
+			if (actionScoresMap.containsKey(avgIndex)) {
+				HashSet<Action> actionWithThisScore = actionScoresMap.get(avgIndex);
+				actionWithThisScore.add(allLegalActions[k]);
+			} else {
+				HashSet<Action> actionWithThisScore = new HashSet<Action>();
+				actionWithThisScore.add(allLegalActions[k]);
+				actionScoresMap.put(avgIndex, actionWithThisScore);
+			}
+		}
+		
+
+
+		
+		// show something ---------------------
+		Double[] scoreArr = orderActionScores(actionScoresMap.keySet());
+		/*
+			for (int i = 0; i < scoreArr.length; i++) {
+			HashSet<Action> actionWithThisScore = actionScoresMap.get(scoreArr[i]);
+				System.out.print("Score "+scoreArr[i]+" rank("+(i+1)+"): ");
+				for (Action anyact : actionWithThisScore) {
+					printAction(chains, doc, ces, anyact);
+				}
+			}
+			System.out.println("==================================================");
+		 */
+		// begin to prun some actions
+		ActionList afterPruningList = new ActionList();
+		afterPruningList.clear();
+
+		int rankingLimit = pruningFactor;
+		if (rankingLimit > scoreArr.length) {
+			rankingLimit = scoreArr.length;
+		}
+
+		int trueBestRank = -1;
+		boolean containTrueBest = false;
+		afterPrunNAct = 0;
+		for (int i = 0; i < rankingLimit; i++) {
+			HashSet<Action> actionWithThisScore = actionScoresMap.get(scoreArr[i]);
+			//System.out.print("Score "+scoreArr[i]+" rank("+(i+1)+"): ");
+			for (Action anyact : actionWithThisScore) {
+				//printAction(chainState, doc, ces, anyact);
+				afterPruningList.insertAction(anyact);
+				afterPrunNAct++;
+				
+				if (anyact.isSameAction(trueBestAct)) {
+					containTrueBest = true;
+					trueBestRank = i;
+				}
+			}
+
+		}
+
+		// how many has been prunned?
+		//System.out.println("OriginNAct = " + originalNAct + " AfterPolicyPruning = " + afterPrunNAct);
+
+		// check prunning performance: good prunning or bad prunning?
+		totalPrunningStep++;
+		if (containTrueBest) {
+			goodPrunningStep++;
+		}
+		//System.out.println("Prunning performance: " + goodPrunningStep + "/" + totalPrunningStep + " " + "trueBestRank = " + trueBestRank);
+		
+		return originalList;
+		//return afterPruningList;
+	}
+	
+	
+
+	
+	private HashMap<Integer, HashSet<DiscrepancyItem>> constructMentionDiscrepancyMap(HashMap<Integer,CorefChain> chainState, Document doc, AnnotationSet ces)
+	{
+		DiscrepancySet disSet = doc.getDiscrepancySet();
+		
+		// classify all discrepanies into groups according to its operMenID
+		HashMap<Integer, HashSet<DiscrepancyItem>> discreGroups = new HashMap<Integer, HashSet<DiscrepancyItem>>();
+		for (DiscrepancyItem item : disSet.getAllDiscreItems().values()) {
+			Integer operMID = item.firstMenID;
+			if (discreGroups.containsKey(operMID)) {
+				HashSet<DiscrepancyItem> group = discreGroups.get(operMID);
+				group.add(item);
+			} else {
+				HashSet<DiscrepancyItem> newgroup = new HashSet<DiscrepancyItem>();
+				newgroup.add(item);
+				discreGroups.put(operMID, newgroup);
+			}
+		}
+		
+		return discreGroups;
+	}
+	
+	private ActionList discrepancyPrunning(HashMap<Integer,CorefChain> chainState, Document doc, AnnotationSet ces, ActionList originalList,
+										   HashMap<Integer, HashSet<DiscrepancyItem>> discreGroups)
+	{
+		int ACT_MERGE = 1;
+		int ACT_NOP = 0;
+		ActionList discreSatisfyList = new ActionList();
+		DiscrepancySet disSet = doc.getDiscrepancySet();
+
+		//System.out.println("Policy prunning!");
+/*
+		// classify all discrepanies into groups according to its operMenID
+		//HashMap<Integer, HashSet<DiscrepancyItem>> discreGroups = new HashMap<Integer, HashSet<DiscrepancyItem>>();
+		discreGroups = new HashMap<Integer, HashSet<DiscrepancyItem>>();
+		for (DiscrepancyItem item : disSet.getAllDiscreItems().values()) {
+			Integer operMID = item.firstMenID;
+			if (discreGroups.containsKey(operMID)) {
+				HashSet<DiscrepancyItem> group = discreGroups.get(operMID);
+				group.add(item);
+			} else {
+				HashSet<DiscrepancyItem> newgroup = new HashSet<DiscrepancyItem>();
+				newgroup.add(item);
+				discreGroups.put(operMID, newgroup);
+			}
+		}
+*/
+
+		for (Action originAct : originalList) {
+			boolean isThisActOK = true;
+			//CorefChain involvedClust = chainState.get(originAct.second);
+			CorefChain singletonClust = chainState.get(originAct.first);
+			Annotation singletonMen = singletonClust.getFirstCe();
+
+			// ----------- Check discrepancy constriants for this cluster pair ---------------
+			// First, is there any discrepancy for chain1(singletion) mention?
+			Integer singletonMenId = Integer.parseInt(singletonMen.getAttribute(Constants.CE_ID));
+			HashSet<DiscrepancyItem> allDisItemForThisMention = null;
+			if (discreGroups.containsKey(singletonMenId)) {
+				allDisItemForThisMention = discreGroups.get(singletonMenId);
+			} else {
+				allDisItemForThisMention = new HashSet<DiscrepancyItem>();
+			}
+
+			// Second, if first is true, then is this action satisfy the discrepancy?
+			if (allDisItemForThisMention.size() > 0) {
+				for (DiscrepancyItem relatedItem : allDisItemForThisMention) {
+					//System.out.println("relevent discrepancy: "+relatedItem.toString());
+					
+					// is this a NO-OP discrepancy?
+					if (relatedItem.secondMenID == -1) {
+						if (originAct.getActName() == ACT_NOP) {
+							isThisActOK = true;
+						} else {
+							isThisActOK = false;
+						}
+						
+					// this is a null discrepancy, only occupy a position but do nothing about constraint
+					} else if (relatedItem.secondMenID == -2) {	
+						isThisActOK = true;
+						
+					// this is a "Link-To" discrepancy
+					} else {
+						if (originAct.getActName() == ACT_NOP) {
+							isThisActOK = false;
+						} else if (originAct.getActName() == ACT_MERGE) {
+							CorefChain involvedClust = chainState.get(originAct.second);
+							for (Annotation ce2 : involvedClust.getCes()) {
+								isThisActOK = false;
+								int ceId2 = Integer.parseInt(ce2.getAttribute(Constants.CE_ID));
+								//System.out.println( ceId2);
+								if (relatedItem.secondMenID == ceId2) {
+									isThisActOK = true;
+									break;
+								}
+							}
+						}
+					}
+				}
+			} else {
+				// no constraint
+				// this action is definitely OK
+			}
+			// --------- End of checking discrepancy constriants for this cluster pair ------------
+			
+			if (isThisActOK) {
+				discreSatisfyList.insertAction(originAct);
+			}
+		}
+		
+		//System.out.println("Dispruning: number left = "+discreSatisfyList.size());
+		
+		return discreSatisfyList;
+	}
+	
+	private int getFeatureDimension()
+	{
+		int d = getBinarizer().getNumBinaryFeatures()+getClusterFeatures().size() + 1;
+		return d;
+	}
+	
+	private double[] genActionFeatVec(HashMap<Integer,CorefChain> chainState, Document doc, AnnotationSet ces, Action act) // weightVec
+	{
+		double[] emtpyArr = new double[256];
+		double featVector[] = emtpyArr;
+		int ACT_MERGE = 1;
+		int ACT_NOP = 0; 
+
+		double nMentionPair = 0;
+		double insideClusterEdge[] = new double[256];
+		double betweenClusterEdge[] = new double[256];
+		int localFeatDem = getLocalFeatures().size();
+		int clustFeatDem = getClusterFeatures().size();
+		int insideLength = 0;
+		int outsideLength = 0;
+
+		// clear zero
+		vectorClearZero(insideClusterEdge);
+		vectorClearZero(betweenClusterEdge);
+
+		// FEATURE - FEATURE - FEATURE - FEATURE - FEATURE - FEATURE - FEATURE
+		// ----------------------------------------------------------------
+		int actType = act.getActName();
+		// for merge
+		int singletonClustID = act.second;
+		int mergeInClustID = act.first;
+		// for split
+		int operMenID = act.operatedMenID;
+		int splitOutClustID = act.first;
+
+		// 0 -> 1
+		if (actType == ACT_MERGE) {
+			Annotation involvedMen = null;
+			CorefChain involvedClust = null;
+			CorefChain singletonClust = null;
+			
+			// involved cluster
+			involvedClust = chainState.get(act.second);
+			// singleton cluster
+			singletonClust = chainState.get(act.first);
+			
+			// involved mention
+			involvedMen = singletonClust.getFirstCe();//menClust.getFirstCe();
+
+			// mention pairs ---------------------------
+			for (Annotation ce2 : involvedClust.getCes()) {
+				Integer thisMid = Integer.parseInt(ce2.getAttribute(Constants.CE_ID));
+				Integer involovedMid = Integer.parseInt(involvedMen.getAttribute(Constants.CE_ID));
+				if (thisMid != involovedMid) {
+					Annotation first = involvedMen;
+					Annotation second = ce2;
+					if (ce2.compareSpan(involvedMen) < 0) {
+						first = ce2;
+						second = involvedMen;
+					}
+					double tmparr[] = getLocalFeatureVector(first, second, doc);
+					// - \phi_0 + \phi_1
+					// Merge action concern the similarity btween mention and entity, 
+					// we use positive score to represent similarity
+					for (int i = 0; i < tmparr.length; i++) {
+						insideClusterEdge[i] += (tmparr[i]);
+					}
+					insideLength = tmparr.length;
+					nMentionPair++;
+				}
+			}
+
+			// cluster features ----------------------------------
+			// Merge action concern the similarity between mention and entity, 
+			// we use positive score to represent similarity
+			CorefChain firstCl = involvedClust;
+			CorefChain secondCl = singletonClust;
+			if (singletonClust.before(involvedClust)) {
+				firstCl = singletonClust;
+				secondCl = involvedClust;
+			}
+			double tmparr2[] = getFeatureVector(firstCl, secondCl, doc, true);
+			// merge measure the similarity
+			for (int i = 0; i < tmparr2.length; i++) {
+				betweenClusterEdge[i] += (1 * tmparr2[i]);
+			}
+			outsideLength = tmparr2.length;
+			
+			// =======================================
+			int totalLength = insideLength + outsideLength + 1;
+			int trueDem     = getFeatureDimension();//getBinarizer().getNumBinaryFeatures()+getClusterFeatures().size() + 1;
+			if (totalLength != trueDem) {
+				throw new RuntimeException("Wrong feature vector demension! "+totalLength+" which should be "+trueDem);
+			}
+			
+			featVector = new double[totalLength];
+			for (int j = 0; j < insideLength; j++) { // inside vector
+				featVector[j] = (insideClusterEdge[j] / nMentionPair); // average of all mention pairs between a metion all other mentions in a cluster
+			}
+			for (int k = 0; k < outsideLength; k++) { // outside vector
+				int k2 = k + insideLength;
+				featVector[k2] = betweenClusterEdge[k];
+			}
+			// threhold
+			featVector[totalLength - 1] = 0; // this is not a no-op
+			// =======================================
+			// 1 -> 0
+		} else if (actType == ACT_NOP) {
+			int totalLength = getBinarizer().getNumBinaryFeatures()+getClusterFeatures().size() + 1;
+			featVector = new double[totalLength];
+			
+			// threhold
+			featVector[totalLength - 1] = 1; // this is a no-op
+		} else {
+			throw new RuntimeException("huerPhi: Unknown action type!");
+		}
+		// ----------------------------------------------------------------
+		// FEATURE - FEATURE - FEATURE - FEATURE - FEATURE - FEATURE - FEATURE		
+
+		//showVector(insideClusterEdge);
+		//return featVector; 
+		return featVector;
+	}
+	
+	// new policy feature vector (2013-8-4)
+	private double[] genActionFeatVec2(HashMap<Integer,CorefChain> chainState, Document doc, AnnotationSet ces, Action act) // weightVec
+	{
+		double[] emtpyArr = new double[256];
+		double featVector[] = emtpyArr;
+		int ACT_MERGE = 1;
+		int ACT_NOP = 0; 
+
+		double nMentionPair = 0;
+		double insideClusterEdge[] = new double[256];
+		double betweenClusterEdge[] = new double[256];
+		int localFeatDem = getLocalFeatures().size();
+		int clustFeatDem = getClusterFeatures().size();
+		int insideLength = 0;
+		int outsideLength = 0;
+
+		// clear zero
+		vectorClearZero(insideClusterEdge);
+		vectorClearZero(betweenClusterEdge);
+
+		// FEATURE - FEATURE - FEATURE - FEATURE - FEATURE - FEATURE - FEATURE
+		// ----------------------------------------------------------------
+		int actType = act.getActName();
+		// for merge
+		int singletonClustID = act.second;
+		int mergeInClustID = act.first;
+		// for split
+		int operMenID = act.operatedMenID;
+		int splitOutClustID = act.first;
+
+		// 0 -> 1
+		if (actType == ACT_MERGE) {
+			Annotation involvedMen = null;
+			CorefChain involvedClust = null;
+			CorefChain singletonClust = null;
+			
+			// involved cluster
+			involvedClust = chainState.get(act.second);
+			// singleton cluster
+			singletonClust = chainState.get(act.first);
+			
+			// involved mention
+			involvedMen = singletonClust.getFirstCe();//menClust.getFirstCe();
+
+			// mention pairs ---------------------------
+			Annotation bestLinkMention = null;
+			bestLinkMention = involvedClust.getFirstCe();
+			
+			Annotation first = involvedMen;
+			Annotation second = bestLinkMention;
+			if (bestLinkMention.compareSpan(involvedMen) < 0) {
+				first = bestLinkMention;
+				second = involvedMen;
+			}
+			insideClusterEdge = getLocalFeatureVector(first, second, doc);
+			insideLength = insideClusterEdge.length;
+
+
+			// cluster features ----------------------------------
+			// Merge action concern the similarity between mention and entity, 
+			// we use positive score to represent similarity
+			CorefChain firstCl = involvedClust;
+			CorefChain secondCl = singletonClust;
+			if (singletonClust.before(involvedClust)) {
+				firstCl = singletonClust;
+				secondCl = involvedClust;
+			}
+			double tmparr2[] = getFeatureVector(firstCl, secondCl, doc, true);
+			// merge measure the similarity
+			for (int i = 0; i < tmparr2.length; i++) {
+				betweenClusterEdge[i] += (tmparr2[i]);
+			}
+			outsideLength = tmparr2.length;
+
+			// =======================================
+			int totalLength = insideLength + outsideLength + 1;
+			//int trueDem     = getBinarizer().getNumBinaryFeatures()+getClusterFeatures().size() + 1;
+			//if (totalLength != trueDem) {
+			//	throw new RuntimeException("Wrong feature vector demension! "+totalLength+" which should be "+trueDem);
+			//}
+			
+			featVector = new double[totalLength];
+			for (int j = 0; j < insideLength; j++) { // inside vector
+				featVector[j] = insideClusterEdge[j]; // average of all mention pairs between a metion all other mentions in a cluster
+			}
+			for (int k = 0; k < outsideLength; k++) { // outside vector
+				int k2 = k + insideLength;
+				featVector[k2] = betweenClusterEdge[k];
+			}
+			// threhold
+			featVector[totalLength - 1] = 0; // this is not a no-op
+			// =======================================
+			// 1 -> 0
+		} else if (actType == ACT_NOP) {
+			int totalLength = getBinarizer().getNumBinaryFeatures()+getClusterFeatures().size() + 1;
+			//int totalLength = getBinarizer().getNumBinaryFeatures() + 1;
+			featVector = new double[totalLength];
+			
+			// threhold
+			featVector[totalLength - 1] = 1; // this is a no-op
+		} else {
+			throw new RuntimeException("huerPhi: Unknown action type!");
+		}
+		// ----------------------------------------------------------------
+		// FEATURE - FEATURE - FEATURE - FEATURE - FEATURE - FEATURE - FEATURE		
+
+		//showVector(insideClusterEdge);
+		//return featVector; 
+		return featVector;
+	}
+	
+
+	
+	
+	private double[] genActionFeatVecLongerNOOP(HashMap<Integer,CorefChain> chainState, Document doc, AnnotationSet ces, Action act) // weightVec
+	{
+		double[] emtpyArr = new double[256];
+		double featVector[] = emtpyArr;
+		int ACT_MERGE = 1;
+		int ACT_NOP = 0; 
+
+		double nMentionPair = 0;
+		double insideClusterEdge[] = new double[256];
+		double betweenClusterEdge[] = new double[256];
+		int localFeatDem = getLocalFeatures().size();
+		int clustFeatDem = getClusterFeatures().size();
+		int insideLength = 0;
+		int outsideLength = 0;
+
+		// clear zero
+		vectorClearZero(insideClusterEdge);
+		vectorClearZero(betweenClusterEdge);
+
+		// FEATURE - FEATURE - FEATURE - FEATURE - FEATURE - FEATURE - FEATURE
+		// ----------------------------------------------------------------
+		int actType = act.getActName();
+		// for merge
+		int singletonClustID = act.second;
+		int mergeInClustID = act.first;
+		// for split
+		int operMenID = act.operatedMenID;
+		int splitOutClustID = act.first;
+
+		// 0 -> 1
+		if (actType == ACT_MERGE) {
+			Annotation involvedMen = null;
+			CorefChain involvedClust = null;
+			CorefChain singletonClust = null;
+			
+			// involved cluster
+			involvedClust = chainState.get(act.second);
+			// singleton cluster
+			singletonClust = chainState.get(act.first);
+			
+			// involved mention
+			involvedMen = singletonClust.getFirstCe();//menClust.getFirstCe();
+
+			// mention pairs ---------------------------
+			for (Annotation ce2 : involvedClust.getCes()) {
+				Integer thisMid = Integer.parseInt(ce2.getAttribute(Constants.CE_ID));
+				Integer involovedMid = Integer.parseInt(involvedMen.getAttribute(Constants.CE_ID));
+				if (thisMid != involovedMid) {
+					Annotation first = involvedMen;
+					Annotation second = ce2;
+					if (ce2.compareSpan(involvedMen) < 0) {
+						first = ce2;
+						second = involvedMen;
+					}
+					double tmparr[] = getLocalFeatureVector(first, second, doc);
+					// - \phi_0 + \phi_1
+					// Merge action concern the similarity btween mention and entity, 
+					// we use positive score to represent similarity
+					for (int i = 0; i < tmparr.length; i++) {
+						insideClusterEdge[i] += (tmparr[i]);
+					}
+					insideLength = tmparr.length;
+					nMentionPair++;
+				}
+			}
+
+			// cluster features ----------------------------------
+			// Merge action concern the similarity between mention and entity, 
+			// we use positive score to represent similarity
+			CorefChain firstCl = involvedClust;
+			CorefChain secondCl = singletonClust;
+			if (singletonClust.before(involvedClust)) {
+				firstCl = singletonClust;
+				secondCl = involvedClust;
+			}
+			double tmparr2[] = getFeatureVector(firstCl, secondCl, doc, true);
+			// merge measure the similarity
+			for (int i = 0; i < tmparr2.length; i++) {
+				betweenClusterEdge[i] += (1 * tmparr2[i]);
+			}
+			outsideLength = tmparr2.length;
+			
+			// =======================================
+			int noopLen = bkleyFeatureGen.getFeatureVectorDimension();
+			int totalLength = insideLength + outsideLength + noopLen;
+			int trueDem     = getFeatureDimension();//getBinarizer().getNumBinaryFeatures()+getClusterFeatures().size() + 1;
+			//if (totalLength != trueDem) {
+			//	throw new RuntimeException("Wrong feature vector demension! "+totalLength+" which should be "+trueDem);
+			//}
+			
+			featVector = new double[totalLength];
+			vectorClearZero(featVector);
+			for (int j = 0; j < insideLength; j++) { // inside vector
+				featVector[j] = (insideClusterEdge[j] / nMentionPair); // average of all mention pairs between a metion all other mentions in a cluster
+			}
+			for (int k = 0; k < outsideLength; k++) { // outside vector
+				int k2 = k + insideLength;
+				featVector[k2] = betweenClusterEdge[k];
+			}
+			// threhold
+			//featVector[totalLength - 1] = 0; // this is not a no-op
+			// =======================================
+			// 1 -> 0
+		} else if (actType == ACT_NOP) { // this is a no-op
+			Annotation involvedMen = null;
+			CorefChain singletonClust = null;
+			singletonClust = chainState.get(act.first);
+			involvedMen = singletonClust.getFirstCe();
+			
+			int nonNOPLen = getBinarizer().getNumBinaryFeatures()+getClusterFeatures().size();
+			int totalLength = getBinarizer().getNumBinaryFeatures()+getClusterFeatures().size() + bkleyFeatureGen.getFeatureVectorDimension();
+			
+			double[] nopVec = bkleyFeatureGen.featureSuitabilityAsAnaphoric(involvedMen, doc);
+			
+			featVector = new double[totalLength];
+			vectorClearZero(featVector);
+			for (int k = 0; k < nopVec.length; k++) {
+				featVector[k + nonNOPLen] = nopVec[k];
+			}
+			// threhold
+			//featVector[totalLength - 1] = 1; 
+		} else {
+			throw new RuntimeException("huerPhi: Unknown action type!");
+		}
+		// ----------------------------------------------------------------
+		// FEATURE - FEATURE - FEATURE - FEATURE - FEATURE - FEATURE - FEATURE		
+
+		//showVector(insideClusterEdge);
+		//return featVector; 
+		return featVector;
+	}
+	
+	
+
+	
+	// true: satisfy discrepency
+	// false: violate discrepency
+	private boolean checkDiscrepency()
+	{
+		return true;
+	}
+	
+	// all the mention stay in the singletion cluster
+	private void getInitState()
+	{
+		
+	}
+	
+	// return true if there is an unprocessed cluster
+	private boolean hasUnprocessedCluster(HashMap<Integer,CorefChain> allChains)
+	{
+		boolean result = false;
+		for (CorefChain chain : allChains.values()) {
+			if (chain.getProcessed() == false) {
+				result = true;
+				break;
+			}
+		}
+		return result;
+	}
+	
+	// get action from discrepancy directly
+	Action getActionFromDiscrepancySet(HashMap<Integer,CorefChain> chainState, int ceId, Document doc, AnnotationSet ces,
+									   HashMap<Integer, HashSet<DiscrepancyItem>> discreGroups)
+	{
+		double[] emptyLocalVec = new double[1];
+		double   emptyLocalWgt = Double.MIN_VALUE;
+		int ACT_MERGE = 1;
+		int ACT_NOP = 0; 
+		
+		CorefChain unprocessedChain = getOneUnprocessedSingleton(chainState); // usually, it should be a singleton
+		Integer mid = Integer.parseInt(unprocessedChain.getFirstCe().getAttribute(Constants.CE_ID));
+		Action discreAction = null;
+		//System.out.println("Looking for discrepancy for MID "+mid);
+		
+		//Action curAction = new Action(clust1, clust2,  ACT_MERGE, opmid, emptyLocalWgt, emptyLocalVec);
+		//curAction.setActName(ACT_MERGE); // this is a merge
+		
+		/*
+			if (canMerge) {
+				n_actions++;
+					//Action curAction = new Action(c1.getId(), c2.getId(), localWeight, localVector);
+					CorefChain antecedentClust = chain2;
+					CorefChain singleClust = chain1;
+					Annotation operatedMen = chain1.getFirstCe();
+					
+					int clust1 = Integer.parseInt(operatedMen.getAttribute(Constants.CLUSTER_ID));
+					int clust2 = Integer.parseInt(chain2.getFirstCe().getAttribute(Constants.CLUSTER_ID));
+					int opmid = Integer.parseInt(operatedMen.getAttribute(Constants.CE_ID));
+					
+					Action curAction = new Action(clust1, clust2,  ACT_MERGE, opmid, emptyLocalWgt, emptyLocalVec);
+					curAction.setActName(ACT_MERGE); // this is a merge
+					
+					sortedActions.insertAction(curAction);
+				}// if discrepancy set allow this merge
+			}
+			
+			if (!NO_NOP) {
+				// NOP Action
+				int singleCl = Integer.parseInt(chain1.getFirstCe().getAttribute(Constants.CLUSTER_ID));
+				int operatedMid = Integer.parseInt(chain1.getFirstCe().getAttribute(Constants.CE_ID));
+				Action nopAction = new Action(singleCl, -1, ACT_NOP, operatedMid, emptyLocalWgt, emptyLocalVec); // this is an action of "do nothing"
+				nopAction.setActName(ACT_NOP);
+			
+				sortedActions.insertAction(nopAction); // add nop action into the quee
+		
+		 */
+		
+		/*
+		 				for (DiscrepancyItem relatedItem : allDisItemForThisMention) {
+					// is this a NO-OP discrepancy?
+					if (relatedItem.secondMenID == -1) {
+						if (originAct.getActName() == ACT_NOP) {
+							isThisActOK = true;
+						} else {
+							isThisActOK = false;
+						}
+						
+					// this is a null discrepancy, only occupy a position but do nothing about constraint
+					} else if (relatedItem.secondMenID == -2) {	
+						isThisActOK = true;
+						
+					// this is a "Link-To" discrepancy
+					} else {
+						if (originAct.getActName() == ACT_NOP) {
+							isThisActOK = false;
+						} else if (originAct.getActName() == ACT_MERGE) {
+							CorefChain involvedClust = chainState.get(originAct.second);
+							for (Annotation ce2 : involvedClust.getCes()) {
+								isThisActOK = false;
+								int ceId2 = Integer.parseInt(ce2.getAttribute(Constants.CE_ID));
+								if (relatedItem.secondMenID == ceId2) {
+									isThisActOK = true;
+									break;
+								}
+							}
+						}
+					}
+				}
+		 */
+		// 1) get the related discrepancy (if any)
+		if (discreGroups.containsKey(mid)) {
+			HashSet<DiscrepancyItem> allDisItemForThisMention = discreGroups.get(mid);
+			if (allDisItemForThisMention.size() > 1) {
+				throw new RuntimeException("Why there is more than one discrepancy for mention "+mid+"?");
+			}
+			if (allDisItemForThisMention.size() < 1) {
+				throw new RuntimeException("Where is the discrepancy for mention "+mid+"???");
+			}
+			
+			for (DiscrepancyItem relatedItem : allDisItemForThisMention) {
+				// is this a NO-OP discrepancy?
+				if (relatedItem.secondMenID == -1) {
+					// return a NO-OP action
+					Annotation operMention = ces.getAnnotationByNO(mid.intValue());
+					int singleCl = Integer.parseInt(operMention.getAttribute(Constants.CLUSTER_ID));
+					int operatedMid = Integer.parseInt(operMention.getAttribute(Constants.CE_ID));//mid; //Integer.parseInt(chain1.getFirstCe().getAttribute(Constants.CE_ID));
+					discreAction = new Action(singleCl, -1, ACT_NOP, operatedMid, emptyLocalWgt, emptyLocalVec); // this is an action of "do nothing"
+					discreAction.setActName(ACT_NOP);
+
+				// this is a null discrepancy, only occupy a position but do nothing about constraint
+				} else if (relatedItem.secondMenID == -2) {	
+					discreAction = null;
+					
+				// this is a "Link-To" discrepancy
+				} else {
+					int menId1 = relatedItem.firstMenID;
+					int menId2 = relatedItem.secondMenID;
+					Annotation currentMention = ces.getAnnotationByNO(menId1);
+					Annotation linktoMention  = ces.getAnnotationByNO(menId2);
+					
+					///CorefChain antecedentClust = chain2;
+					//CorefChain singleClust = chain1;
+					//Annotation operatedMen = chain1.getFirstCe();
+					
+					int clust1 = Integer.parseInt(currentMention.getAttribute(Constants.CLUSTER_ID));
+					int clust2 = Integer.parseInt(linktoMention.getAttribute(Constants.CLUSTER_ID));
+					int opmid = Integer.parseInt(currentMention.getAttribute(Constants.CE_ID));
+					
+					discreAction = new Action(clust1, clust2,  ACT_MERGE, opmid, emptyLocalWgt, emptyLocalVec);
+					discreAction.setActName(ACT_MERGE); // this is a merge
+				}
+			}
+			
+			// a discrepancy action
+			//System.out.println("find a discrepancy!");
+			return discreAction;
+		} else {
+			// no dicrepancy action ...
+			//System.out.println("no discrepancy!");
+		}
+			
+		// if no discrepancy for this mention
+		// you can not get any discrepancy action at all, so return null
+		return null;
+	}
+
+	/** Score comparator */
+	public static class ConfidenceComparator implements Comparator<Double> {
+		public int compare(Double s1, Double s2) {
+			if ((s1 - s2) < 0) return -1;
+			return 1;
+		}
+	}
+	
+	private HashMap<Integer, Integer> getIndicatorArr(HashMap<Integer, Double> policyConfidence, int Ts)
+	{
+		HashMap<Integer, Integer> indicate = new HashMap<Integer, Integer>();
+		ArrayList<Double> confidenceList = new ArrayList<Double>();
+		
+		//System.out.println("Ts = "+Ts);
+		
+		int count = 0;
+		for (int i = 0; i < policyConfidence.size(); i++) {
+			Double min = Double.MAX_VALUE;
+			int minMID = -1;
+			for (Integer mid : policyConfidence.keySet()) {
+				Double con = policyConfidence.get(mid);
+				if (!indicate.containsKey(mid)) {
+					if (con < min) {
+						min = con;
+						minMID = mid;
+					}
+				}
+			}
+			count++;
+			indicate.put(minMID, 1);
+			//System.out.println("put "+minMID+" 1");
+			if (count >= Ts) {
+				break;
+			}
+		}
+		
+		// set all others zero
+		for (Integer mid : policyConfidence.keySet()) {
+			if (!indicate.containsKey(mid)) {
+				indicate.put(mid, 0);
+			}
+		}	
+		
+		for (Integer mid : policyConfidence.keySet()) {
+			int ind = indicate.get(mid);
+			//System.out.println(mid+" : "+ind);
+		}
+		return indicate;
+	}
+	
+	private HashMap<Integer, Integer> getConfidenceRankingArr(HashMap<Integer, Double> policyConfidence)
+	{
+		HashMap<Integer, Integer> ranking = new HashMap<Integer, Integer>();
+		ArrayList<Double> confidenceList = new ArrayList<Double>();
+		
+		int count = 0;
+		for (int i = 0; i < policyConfidence.size(); i++) {
+			Double min = Double.MAX_VALUE;
+			int minMID = -1;
+			for (Integer mid : policyConfidence.keySet()) {
+				Double con = policyConfidence.get(mid);
+				if (!ranking.containsKey(mid)) {
+					if (con < min) {
+						min = con;
+						minMID = mid;
+					}
+				}
+			}
+			count++;
+			ranking.put(minMID, count);
+		}
+		
+		//for (Integer mid : policyConfidence.keySet()) {
+		//	int ind = indicate.get(mid);
+		//	//System.out.println(mid+" : "+ind);
+		//}
+		return ranking;
+	}
+	
+	private void loadAllPolicyWeight()
+	{
+		SystemConfig cfg = Utils.getConfig();
+
+		if (norNounWeight == null || proNounWeight == null) {
+			String corpusName = cfg.getDataset();
+			String WEIGHT_PATH1 = cfg.getString("POLICY_NOM_WEIGHT_PATH", Utils.getWorkDirectory()+"/"+"policy.w");
+			String WEIGHT_PATH2 = cfg.getString("POLICY_RON_WEIGHT_PATH", Utils.getWorkDirectory()+"/"+"policyPro.w"); // for pronoun
+			// loading policy weight vector
+			if (corpusName.equals("ace04")) {
+				WEIGHT_PATH1 = cfg.getString("POLICY_NOM_WEIGHT_PATH", Utils.getWorkDirectory()+"/"+"policy_ace04.w");
+				WEIGHT_PATH2 = cfg.getString("POLICY_RON_WEIGHT_PATH", Utils.getWorkDirectory()+"/"+"policyPro_ace04.w"); // for pronoun
+			} else if (corpusName.equals("muc6")) {
+				WEIGHT_PATH1 = cfg.getString("POLICY_NOM_WEIGHT_PATH", Utils.getWorkDirectory()+"/"+"policy_muc6.w");
+				WEIGHT_PATH2 = cfg.getString("POLICY_RON_WEIGHT_PATH", Utils.getWorkDirectory()+"/"+"policyPro_muc6.w"); // for pronoun
+			} else {
+				throw new RuntimeException("Unknown dataset type!");
+			}
+			// output them
+			System.out.println("Policy loading weight from: "+WEIGHT_PATH1);
+			System.out.println("Policy loading weight from: "+WEIGHT_PATH2);
+			norNounWeight = loadSearchWeights(WEIGHT_PATH1);
+			proNounWeight = loadSearchWeights(WEIGHT_PATH2);
+		}
+	}
+	
+	private double[] connectVector(double vec1[], double vec2[])
+	{
+		int newLenght = vec1.length + vec2.length;
+		double[] newVec = new double[newLenght];
+		// vector 1
+		for (int i = 0; i < vec1.length; i++) {
+			newVec[i] = vec1[i];
+		}
+		// vector 2
+		for (int j = 0; j < vec2.length; j++) {
+			newVec[vec1.length + j] = vec2[j];
+		}
+		return newVec;
+	}
+	// about policy hash
+	
+	
+	
+	//// For visualization (2013-8-15)
+	public void runPolicyDummy(Document doc, AnnotationSet ces)
+	{
+		for (Annotation ce : ces.getOrderedAnnots()) {
+			//printMention(ce, doc);
+			System.out.println(ce.getSpanString(doc));
+		}
+	}
+	
+	@Override
+	public void train(Iterable<Document> traindocs,
+			Iterable<Document> validdocs, String outputModelName,
+			String[] options) {
+		// TODO Auto-generated method stub
+		
+	}
+	
+}
+
