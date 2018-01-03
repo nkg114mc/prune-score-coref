@@ -1,5 +1,5 @@
 ## Prune-Score Entity Coreference Resolution System
-----
+
 ### Related Publication
 [Prune-and-Score: Learning for Greedy Coreference Resolution](http://people.oregonstate.edu/~machao/homepage/emnlp14/PruneScore14.pdf) <br />
 Chao Ma, Janardhan Rao Doppa, Xiaoli Fern, Tom Dietterich, and Prasad Tadepalli (EMNLP 2014)
